@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lyraproj/issue/issue"
+	"github.com/lyraproj/puppet-parser/lexer"
 )
 
 // Recursive descent context for the Puppet language.
@@ -54,28 +55,6 @@ var workflowStyles = map[string]StepStyle{
 	`workflow`:     StepStyleWorkflow,
 }
 
-type Lexer interface {
-	CurrentToken() int
-
-	NextToken() int
-
-	SetPos(pos int)
-
-	SyntaxError()
-
-	tokenStartPos() int
-
-	tokenValue() interface{}
-
-	tokenString() string
-
-	AssertToken(token int)
-}
-
-type lexer struct {
-	context
-}
-
 type Option int
 
 const HandleBacktickStrings = Option(1)
@@ -84,49 +63,13 @@ const TasksEnabled = Option(3)
 const WorkflowEnabled = Option(4)
 const EppMode = Option(5)
 
-func NewSimpleLexer(filename string, source string) Lexer {
-	// Essentially a lexer that has no knowledge of interpolations
-	return &lexer{context{
-		stringReader:          stringReader{text: source},
-		factory:               nil,
-		locator:               &Locator{string: source, file: filename},
-		handleBacktickStrings: false,
-		handleHexEscapes:      false,
-		tasks:                 false,
-		workflow:              false}}
+type parseError struct {
+	message string
+	offset  int
 }
 
-func (l *lexer) CurrentToken() int {
-	return l.context.currentToken
-}
-
-func (l *lexer) NextToken() int {
-	l.context.nextToken()
-	return l.context.currentToken
-}
-
-func (l *lexer) SetPos(pos int) {
-	l.context.SetPos(pos)
-}
-
-func (l *lexer) SyntaxError() {
-	panic(l.context.parseIssue2(lexUnexpectedToken, issue.H{`token`: tokenMap[l.context.currentToken]}))
-}
-
-func (l *lexer) tokenString() string {
-	return l.context.tokenString()
-}
-
-func (l *lexer) tokenValue() interface{} {
-	return l.context.tokenValue
-}
-
-func (l *lexer) tokenStartPos() int {
-	return l.context.tokenStartPos
-}
-
-func (l *lexer) AssertToken(token int) {
-	l.context.assertToken(token)
+func (e *parseError) Error() string {
+	return fmt.Sprintf(`%s at offset %d`, e.message, e.offset)
 }
 
 // CreatePspecParser returns a parser that is capable of lexing backticked strings and that
@@ -160,7 +103,7 @@ func CreateParser(parserOptions ...Option) ExpressionParser {
 // If eppMode is true, the context will treat the given source as text with embedded puppet
 // expressions.
 func (ctx *context) Parse(filename string, source string, singleExpression bool) (expr Expression, err error) {
-	ctx.stringReader = stringReader{text: source}
+	ctx.StringReader = lexer.NewStringReader(source)
 	ctx.locator = &Locator{string: source, file: filename}
 	ctx.definitions = make([]Definition, 0, 8)
 	ctx.nextLineStart = -1
@@ -177,8 +120,10 @@ func (ctx *context) parseTopExpression(filename string, source string, singleExp
 		if r := recover(); r != nil {
 			var ok bool
 			if err, ok = r.(issue.Reported); !ok {
-				if err, ok = r.(*parseError); !ok {
-					panic(r)
+				if err, ok = r.(*lexer.ReaderError); !ok {
+					if err, ok = r.(*parseError); !ok {
+						panic(r)
+					}
 				}
 			}
 		}
@@ -188,7 +133,7 @@ func (ctx *context) parseTopExpression(filename string, source string, singleExp
 		ctx.consumeEPP()
 
 		var text string
-		if ctx.currentToken == tokenRenderString {
+		if ctx.currentToken == lexer.TokenRenderString {
 			text = ctx.tokenString()
 			ctx.nextToken()
 		}
@@ -205,13 +150,13 @@ func (ctx *context) parseTopExpression(filename string, source string, singleExp
 			return ctx.factory.EppExpression([]Expression{}, e, ctx.locator, 0, ctx.Pos())
 		}
 
-		if ctx.currentToken == tokenEnd {
+		if ctx.currentToken == lexer.TokenEnd {
 			// No EPP in the source.
 			expr = asEppLambda(ctx.factory.RenderString(text, ctx.locator, 0, ctx.Pos()))
 			return
 		}
 
-		if ctx.currentToken == tokenPipe {
+		if ctx.currentToken == lexer.TokenPipe {
 			if text != `` {
 				panic(ctx.parseIssue(parseIllegalEppParameters))
 			}
@@ -219,7 +164,7 @@ func (ctx *context) parseTopExpression(filename string, source string, singleExp
 			ctx.nextToken()
 			expr = asEppLambda(
 				ctx.factory.EppExpression(
-					params, ctx.parse(tokenEnd, false), ctx.locator, 0, ctx.Pos()))
+					params, ctx.parse(lexer.TokenEnd, false), ctx.locator, 0, ctx.Pos()))
 			return
 		}
 
@@ -229,7 +174,7 @@ func (ctx *context) parseTopExpression(filename string, source string, singleExp
 		}
 
 		for {
-			if ctx.currentToken == tokenEnd {
+			if ctx.currentToken == lexer.TokenEnd {
 				expr = asEppLambda(ctx.factory.Block(ctx.transformCalls(expressions, 0), ctx.locator, 0, ctx.Pos()))
 				return
 			}
@@ -238,7 +183,7 @@ func (ctx *context) parseTopExpression(filename string, source string, singleExp
 	}
 
 	ctx.nextToken()
-	expr = ctx.parse(tokenEnd, singleExpression)
+	expr = ctx.parse(lexer.TokenEnd, singleExpression)
 	return
 }
 
@@ -258,7 +203,7 @@ func (ctx *context) parse(expectedEnd int, singleExpression bool) (expr Expressi
 	expressions := make([]Expression, 0, 10)
 	for ctx.currentToken != expectedEnd {
 		expressions = append(expressions, ctx.syntacticStatement())
-		if ctx.currentToken == tokenSemicolon {
+		if ctx.currentToken == lexer.TokenSemicolon {
 			ctx.nextToken()
 		}
 	}
@@ -269,18 +214,18 @@ func (ctx *context) parse(expectedEnd int, singleExpression bool) (expr Expressi
 func (ctx *context) assertToken(token int) {
 	if ctx.currentToken != token {
 		ctx.SetPos(ctx.tokenStartPos)
-		panic(ctx.parseIssue2(parseExpectedToken, issue.H{`expected`: tokenMap[token], `actual`: tokenMap[ctx.currentToken]}))
+		panic(ctx.parseIssue2(parseExpectedToken, issue.H{`expected`: lexer.TokenMap[token], `actual`: lexer.TokenMap[ctx.currentToken]}))
 	}
 }
 
 func (ctx *context) tokenString() string {
 	if ctx.tokenValue == nil {
-		return tokenMap[ctx.currentToken]
+		return lexer.TokenMap[ctx.currentToken]
 	}
 	if str, ok := ctx.tokenValue.(string); ok {
 		return str
 	}
-	panic(fmt.Sprintf("Token '%s' has no string representation", tokenMap[ctx.currentToken]))
+	panic(fmt.Sprintf("Token '%s' has no string representation", lexer.TokenMap[ctx.currentToken]))
 }
 
 // Iterates all statements in a block and transforms qualified names that names a "statement call" and are followed
@@ -347,12 +292,12 @@ func (ctx *context) expressions(endToken int, producerFunc func() Expression) (e
 			return
 		}
 		exprs = append(exprs, producerFunc())
-		if ctx.currentToken != tokenComma {
+		if ctx.currentToken != lexer.TokenComma {
 			if ctx.currentToken != endToken {
 				ctx.SetPos(ctx.tokenStartPos)
 				panic(ctx.parseIssue2(parseExpectedOneOfTokens, issue.H{
-					`expected`: fmt.Sprintf(`'%s' or '%s'`, tokenMap[tokenComma], tokenMap[endToken]),
-					`actual`:   tokenMap[ctx.currentToken]}))
+					`expected`: fmt.Sprintf(`'%s' or '%s'`, lexer.TokenMap[lexer.TokenComma], lexer.TokenMap[endToken]),
+					`actual`:   lexer.TokenMap[ctx.currentToken]}))
 			}
 			return
 		}
@@ -363,7 +308,7 @@ func (ctx *context) expressions(endToken int, producerFunc func() Expression) (e
 func (ctx *context) syntacticStatement() (expr Expression) {
 	var args []Expression
 	expr = ctx.relationship()
-	for ctx.currentToken == tokenComma {
+	for ctx.currentToken == lexer.TokenComma {
 		ctx.nextToken()
 		if args == nil {
 			args = make([]Expression, 0, 2)
@@ -383,7 +328,7 @@ func (ctx *context) collectionEntry() (expr Expression) {
 
 func (ctx *context) argument() (expr Expression) {
 	expr = ctx.handleKeyword(ctx.relationship)
-	if ctx.currentToken == tokenFarrow {
+	if ctx.currentToken == lexer.TokenFarrow {
 		ctx.nextToken()
 		value := ctx.handleKeyword(ctx.relationship)
 		expr = ctx.factory.KeyedEntry(expr, value, ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -397,10 +342,10 @@ func (ctx *context) hashEntry() (expr Expression) {
 
 func (ctx *context) handleKeyword(next func() Expression) (expr Expression) {
 	switch ctx.currentToken {
-	case tokenType, tokenFunction, tokenPlan, tokenApplication, tokenConsumes, tokenProduces, tokenSite:
+	case lexer.TokenType, lexer.TokenFunction, lexer.TokenPlan, lexer.TokenApplication, lexer.TokenConsumes, lexer.TokenProduces, lexer.TokenSite:
 		expr = ctx.factory.QualifiedName(ctx.tokenString(), ctx.locator, ctx.tokenStartPos, ctx.Pos()-ctx.tokenStartPos)
 		ctx.nextToken()
-		if ctx.currentToken == tokenLp {
+		if ctx.currentToken == lexer.TokenLp {
 			expr = ctx.callFunctionExpression(expr)
 		}
 	default:
@@ -413,7 +358,7 @@ func (ctx *context) relationship() (expr Expression) {
 	expr = ctx.assignment()
 	for {
 		switch ctx.currentToken {
-		case tokenInEdge, tokenInEdgeSub, tokenOutEdge, tokenOutEdgeSub:
+		case lexer.TokenInEdge, lexer.TokenInEdgeSub, lexer.TokenOutEdge, lexer.TokenOutEdgeSub:
 			op := ctx.tokenString()
 			ctx.nextToken()
 			expr = ctx.factory.RelOp(op, expr, ctx.assignment(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -427,7 +372,7 @@ func (ctx *context) assignment() (expr Expression) {
 	expr = ctx.step()
 	for {
 		switch ctx.currentToken {
-		case tokenAssign, tokenAddAssign, tokenSubtractAssign:
+		case lexer.TokenAssign, lexer.TokenAddAssign, lexer.TokenSubtractAssign:
 			op := ctx.tokenString()
 			ctx.nextToken()
 			expr = ctx.factory.Assignment(op, expr, ctx.assignment(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -455,7 +400,7 @@ func (ctx *context) step() (expr Expression) {
 
 func (ctx *context) resource() (expr Expression) {
 	expr = ctx.expression()
-	if ctx.currentToken == tokenLc {
+	if ctx.currentToken == lexer.TokenLc {
 		expr = ctx.resourceExpression(expr.ByteOffset(), expr, REGULAR)
 	}
 	return
@@ -464,7 +409,7 @@ func (ctx *context) resource() (expr Expression) {
 func (ctx *context) expression() (expr Expression) {
 	expr = ctx.selectExpression()
 	switch ctx.currentToken {
-	case tokenProduces, tokenConsumes:
+	case lexer.TokenProduces, lexer.TokenConsumes:
 		// Must be preceded by name of class
 		capToken := ctx.tokenString()
 		switch expr.(type) {
@@ -488,7 +433,7 @@ func (ctx *context) selectExpression() (expr Expression) {
 	expr = ctx.orExpression()
 	for {
 		switch ctx.currentToken {
-		case tokenQmark:
+		case lexer.TokenQmark:
 			expr = ctx.selectorsExpression(expr)
 		default:
 			return
@@ -500,7 +445,7 @@ func (ctx *context) orExpression() (expr Expression) {
 	expr = ctx.andExpression()
 	for {
 		switch ctx.currentToken {
-		case tokenOr:
+		case lexer.TokenOr:
 			ctx.nextToken()
 			expr = ctx.factory.Or(expr, ctx.andExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
 		default:
@@ -513,7 +458,7 @@ func (ctx *context) andExpression() (expr Expression) {
 	expr = ctx.compareExpression()
 	for {
 		switch ctx.currentToken {
-		case tokenAnd:
+		case lexer.TokenAnd:
 			ctx.nextToken()
 			expr = ctx.factory.And(expr, ctx.compareExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
 		default:
@@ -526,7 +471,7 @@ func (ctx *context) compareExpression() (expr Expression) {
 	expr = ctx.equalExpression()
 	for {
 		switch ctx.currentToken {
-		case tokenLess, tokenLessEqual, tokenGreater, tokenGreaterEqual:
+		case lexer.TokenLess, lexer.TokenLessEqual, lexer.TokenGreater, lexer.TokenGreaterEqual:
 			op := ctx.tokenString()
 			ctx.nextToken()
 			expr = ctx.factory.Comparison(op, expr, ctx.equalExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -542,7 +487,7 @@ func (ctx *context) equalExpression() (expr Expression) {
 	for {
 		t := ctx.currentToken
 		switch t {
-		case tokenEqual, tokenNotEqual:
+		case lexer.TokenEqual, lexer.TokenNotEqual:
 			op := ctx.tokenString()
 			ctx.nextToken()
 			expr = ctx.factory.Comparison(op, expr, ctx.shiftExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -558,7 +503,7 @@ func (ctx *context) shiftExpression() (expr Expression) {
 	for {
 		t := ctx.currentToken
 		switch t {
-		case tokenLshift, tokenRshift:
+		case lexer.TokenLshift, lexer.TokenRshift:
 			op := ctx.tokenString()
 			ctx.nextToken()
 			expr = ctx.factory.Arithmetic(op, expr, ctx.additiveExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -574,7 +519,7 @@ func (ctx *context) additiveExpression() (expr Expression) {
 	for {
 		t := ctx.currentToken
 		switch t {
-		case tokenAdd, tokenSubtract:
+		case lexer.TokenAdd, lexer.TokenSubtract:
 			op := ctx.tokenString()
 			ctx.nextToken()
 			expr = ctx.factory.Arithmetic(op, expr, ctx.multiplicativeExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -590,7 +535,7 @@ func (ctx *context) multiplicativeExpression() (expr Expression) {
 	for {
 		t := ctx.currentToken
 		switch t {
-		case tokenMultiply, tokenDivide, tokenRemainder:
+		case lexer.TokenMultiply, lexer.TokenDivide, lexer.TokenRemainder:
 			op := ctx.tokenString()
 			ctx.nextToken()
 			expr = ctx.factory.Arithmetic(op, expr, ctx.matchExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -606,7 +551,7 @@ func (ctx *context) matchExpression() (expr Expression) {
 	for {
 		t := ctx.currentToken
 		switch t {
-		case tokenMatch, tokenNotMatch:
+		case lexer.TokenMatch, lexer.TokenNotMatch:
 			op := ctx.tokenString()
 			ctx.nextToken()
 			expr = ctx.factory.Match(op, expr, ctx.inExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
@@ -621,7 +566,7 @@ func (ctx *context) inExpression() (expr Expression) {
 	expr = ctx.unaryExpression()
 	for {
 		switch ctx.currentToken {
-		case tokenIn:
+		case lexer.TokenIn:
 			ctx.nextToken()
 			expr = ctx.factory.In(expr, ctx.unaryExpression(), ctx.locator, expr.ByteOffset(), ctx.Pos()-expr.ByteOffset())
 
@@ -632,12 +577,12 @@ func (ctx *context) inExpression() (expr Expression) {
 }
 
 func (ctx *context) arrayExpression() (elements []Expression) {
-	return ctx.joinHashEntries(ctx.expressions(tokenRb, ctx.collectionEntry))
+	return ctx.joinHashEntries(ctx.expressions(lexer.TokenRb, ctx.collectionEntry))
 }
 
 func (ctx *context) keyedEntry() Expression {
 	key := ctx.hashEntry()
-	if ctx.currentToken != tokenFarrow {
+	if ctx.currentToken != lexer.TokenFarrow {
 		panic(ctx.parseIssue(parseExpectedFarrowAfterKey))
 	}
 	ctx.nextToken()
@@ -646,16 +591,16 @@ func (ctx *context) keyedEntry() Expression {
 }
 
 func (ctx *context) hashExpression() (entries []Expression) {
-	return ctx.expressions(tokenRc, ctx.keyedEntry)
+	return ctx.expressions(lexer.TokenRc, ctx.keyedEntry)
 }
 
 func (ctx *context) unaryExpression() Expression {
 	unaryStart := ctx.tokenStartPos
 	switch ctx.currentToken {
-	case tokenSubtract:
+	case lexer.TokenSubtract:
 		if c, _ := ctx.Peek(); isDecimalDigit(c) {
 			ctx.nextToken()
-			if ctx.currentToken == tokenInteger {
+			if ctx.currentToken == lexer.TokenInteger {
 				ctx.settokenValue(ctx.currentToken, -ctx.tokenValue.(int64))
 			} else {
 				ctx.settokenValue(ctx.currentToken, -ctx.tokenValue.(float64))
@@ -668,7 +613,7 @@ func (ctx *context) unaryExpression() Expression {
 		expr := ctx.primaryExpression()
 		return ctx.factory.Negate(expr, ctx.locator, unaryStart, ctx.Pos()-unaryStart)
 
-	case tokenAdd:
+	case lexer.TokenAdd:
 		// Allow '+' prefix for constant numbers
 		if c, _ := ctx.Peek(); isDecimalDigit(c) {
 			ctx.nextToken()
@@ -678,24 +623,24 @@ func (ctx *context) unaryExpression() Expression {
 		}
 		panic(ctx.parseIssue2(lexUnexpectedToken, issue.H{`token`: `+`}))
 
-	case tokenNot:
+	case lexer.TokenNot:
 		ctx.nextToken()
 		expr := ctx.unaryExpression()
 		return ctx.factory.Not(expr, ctx.locator, unaryStart, ctx.Pos()-unaryStart)
 
-	case tokenMultiply:
+	case lexer.TokenMultiply:
 		ctx.nextToken()
 		expr := ctx.unaryExpression()
 		return ctx.factory.Unfold(expr, ctx.locator, unaryStart, ctx.Pos()-unaryStart)
 
-	case tokenAt, tokenAtat:
+	case lexer.TokenAt, lexer.TokenAtat:
 		kind := VIRTUAL
-		if ctx.currentToken == tokenAtat {
+		if ctx.currentToken == lexer.TokenAtat {
 			kind = EXPORTED
 		}
 		ctx.nextToken()
 		expr := ctx.primaryExpression()
-		ctx.assertToken(tokenLc)
+		ctx.assertToken(lexer.TokenLc)
 		return ctx.resourceExpression(unaryStart, expr, kind)
 
 	default:
@@ -707,11 +652,11 @@ func (ctx *context) primaryExpression() (expr Expression) {
 	expr = ctx.atomExpression()
 	for {
 		switch ctx.currentToken {
-		case tokenLp, tokenPipe:
+		case lexer.TokenLp, lexer.TokenPipe:
 			expr = ctx.callFunctionExpression(expr)
-		case tokenLcollect, tokenLlcollect:
+		case lexer.TokenLcollect, lexer.TokenLlcollect:
 			expr = ctx.collectExpression(expr)
-		case tokenLb:
+		case lexer.TokenLb:
 			ctx.nextToken()
 			params := ctx.arrayExpression()
 			isCall := false
@@ -725,10 +670,10 @@ func (ctx *context) primaryExpression() (expr Expression) {
 				expr = ctx.factory.Access(expr, params, ctx.locator, expr.ByteOffset(), l)
 			}
 			ctx.nextToken()
-		case tokenDot:
+		case lexer.TokenDot:
 			ctx.nextToken()
 			var rhs Expression
-			if ctx.currentToken == tokenType {
+			if ctx.currentToken ==lexer.TokenType {
 				rhs = ctx.factory.QualifiedName(ctx.tokenString(), ctx.locator, ctx.tokenStartPos, ctx.Pos()-ctx.tokenStartPos)
 				ctx.nextToken()
 			} else {
@@ -748,67 +693,67 @@ func (ctx *context) primaryExpression() (expr Expression) {
 func (ctx *context) atomExpression() (expr Expression) {
 	atomStart := ctx.tokenStartPos
 	switch ctx.currentToken {
-	case tokenLp, tokenWslp:
+	case lexer.TokenLp, lexer.TokenWslp:
 		ctx.nextToken()
 		expr = ctx.factory.Parenthesized(ctx.relationship(), ctx.locator, atomStart, ctx.Pos()-atomStart)
-		ctx.assertToken(tokenRp)
+		ctx.assertToken(lexer.TokenRp)
 		ctx.nextToken()
 
-	case tokenLb, tokenListstart:
+	case lexer.TokenLb, lexer.TokenListstart:
 		ctx.nextToken()
 		expr = ctx.factory.Array(ctx.arrayExpression(), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenLc:
+	case lexer.TokenLc:
 		ctx.nextToken()
 		expr = ctx.factory.Hash(ctx.hashExpression(), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenBoolean:
+	case lexer.TokenBoolean:
 		expr = ctx.factory.Boolean(ctx.tokenValue.(bool), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenInteger:
+	case lexer.TokenInteger:
 		expr = ctx.factory.Integer(ctx.tokenValue.(int64), ctx.radix, ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenFloat:
+	case lexer.TokenFloat:
 		expr = ctx.factory.Float(ctx.tokenValue.(float64), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenString:
+	case lexer.TokenString:
 		expr = ctx.factory.String(ctx.tokenString(), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenAttr, tokenPrivate:
+	case lexer.TokenAttr, lexer.TokenPrivate:
 		expr = ctx.factory.ReservedWord(ctx.tokenString(), false, ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenDefault:
+	case lexer.TokenDefault:
 		expr = ctx.factory.Default(ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenHeredoc, tokenConcatenatedString:
+	case lexer.TokenHeredoc, lexer.TokenConcatenatedString:
 		expr = ctx.tokenValue.(Expression)
 		ctx.nextToken()
 
-	case tokenRegexp:
+	case lexer.TokenRegexp:
 		expr = ctx.factory.Regexp(ctx.tokenString(), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenUndef:
+	case lexer.TokenUndef:
 		expr = ctx.factory.Undef(ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenTypeName:
+	case lexer.TokenTypeName:
 		expr = ctx.factory.QualifiedReference(ctx.tokenString(), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenIdentifier:
+	case lexer.TokenIdentifier:
 		expr = ctx.factory.QualifiedName(ctx.tokenString(), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenVariable:
+	case lexer.TokenVariable:
 		vni := ctx.tokenValue
 		ctx.nextToken()
 		var name Expression
@@ -819,62 +764,62 @@ func (ctx *context) atomExpression() (expr Expression) {
 		}
 		expr = ctx.factory.Variable(name, ctx.locator, atomStart, ctx.Pos()-atomStart)
 
-	case tokenCase:
+	case lexer.TokenCase:
 		expr = ctx.caseExpression()
 
-	case tokenIf:
+	case lexer.TokenIf:
 		expr = ctx.ifExpression(false)
 
-	case tokenUnless:
+	case lexer.TokenUnless:
 		expr = ctx.ifExpression(true)
 
-	case tokenClass:
+	case lexer.TokenClass:
 		name := ctx.tokenString()
 		ctx.nextToken()
-		if ctx.currentToken == tokenLc {
+		if ctx.currentToken == lexer.TokenLc {
 			// Class resource
 			expr = ctx.factory.QualifiedName(name, ctx.locator, atomStart, ctx.Pos()-atomStart)
 		} else {
 			expr = ctx.classExpression(atomStart)
 		}
 
-	case tokenType:
+	case lexer.TokenType:
 		// look ahead for '(' in which case this is a named function call
 		name := ctx.tokenString()
 		ctx.nextToken()
-		if ctx.currentToken == tokenTypeName {
+		if ctx.currentToken == lexer.TokenTypeName {
 			expr = ctx.typeAliasOrDefinition()
 		} else {
 			// Not a type definition. Just treat the 'type' keyword as a qualified name
 			expr = ctx.factory.QualifiedName(name, ctx.locator, atomStart, ctx.Pos()-atomStart)
 		}
 
-	case tokenPlan:
+	case lexer.TokenPlan:
 		expr = ctx.planDefinition()
 
-	case tokenFunction:
+	case lexer.TokenFunction:
 		expr = ctx.functionDefinition()
 
-	case tokenNode:
+	case lexer.TokenNode:
 		expr = ctx.nodeDefinition()
 
-	case tokenDefine, tokenApplication:
+	case lexer.TokenDefine, lexer.TokenApplication:
 		expr = ctx.resourceDefinition(ctx.currentToken)
 
-	case tokenSite:
+	case lexer.TokenSite:
 		expr = ctx.siteDefinition()
 
-	case tokenRenderString:
+	case lexer.TokenRenderString:
 		expr = ctx.factory.RenderString(ctx.tokenString(), ctx.locator, atomStart, ctx.Pos()-atomStart)
 		ctx.nextToken()
 
-	case tokenRenderExpr:
+	case lexer.TokenRenderExpr:
 		ctx.nextToken()
 		expr = ctx.factory.RenderExpression(ctx.expression(), ctx.locator, atomStart, ctx.Pos()-atomStart)
 
 	default:
 		ctx.SetPos(ctx.tokenStartPos)
-		panic(ctx.parseIssue2(lexUnexpectedToken, issue.H{`token`: tokenMap[ctx.currentToken]}))
+		panic(ctx.parseIssue2(lexUnexpectedToken, issue.H{`token`: lexer.TokenMap[ctx.currentToken]}))
 	}
 	return
 }
@@ -883,20 +828,20 @@ func (ctx *context) ifExpression(unless bool) (expr Expression) {
 	start := ctx.tokenStartPos // start of if, elsif, or unless keyword
 	ctx.nextToken()
 	condition := ctx.orExpression()
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	thenPart := ctx.parse(tokenRc, false)
+	thenPart := ctx.parse(lexer.TokenRc, false)
 	ctx.nextToken()
 
 	var elsePart Expression
 	switch ctx.currentToken {
-	case tokenElse:
+	case lexer.TokenElse:
 		ctx.nextToken()
-		ctx.assertToken(tokenLc)
+		ctx.assertToken(lexer.TokenLc)
 		ctx.nextToken()
-		elsePart = ctx.parse(tokenRc, false)
+		elsePart = ctx.parse(lexer.TokenRc, false)
 		ctx.nextToken()
-	case tokenElsif:
+	case lexer.TokenElsif:
 		if unless {
 			panic(ctx.parseIssue(parseElsifInUnless))
 		}
@@ -917,9 +862,9 @@ func (ctx *context) selectorsExpression(test Expression) (expr Expression) {
 	var selectors []Expression
 	ctx.nextToken()
 	needNext := false
-	if ctx.currentToken == tokenSelc {
+	if ctx.currentToken == lexer.TokenSelc {
 		ctx.nextToken()
-		selectors = ctx.expressions(tokenRc, ctx.selectorEntry)
+		selectors = ctx.expressions(lexer.TokenRc, ctx.selectorEntry)
 		needNext = true
 	} else {
 		selectors = []Expression{ctx.selectorEntry()}
@@ -934,7 +879,7 @@ func (ctx *context) selectorsExpression(test Expression) (expr Expression) {
 func (ctx *context) selectorEntry() (expr Expression) {
 	start := ctx.tokenStartPos
 	lhs := ctx.expression()
-	ctx.assertToken(tokenFarrow)
+	ctx.assertToken(lexer.TokenFarrow)
 	ctx.nextToken()
 	return ctx.factory.Selector(lhs, ctx.expression(), ctx.locator, start, ctx.Pos()-start)
 }
@@ -943,7 +888,7 @@ func (ctx *context) caseExpression() Expression {
 	start := ctx.tokenStartPos
 	ctx.nextToken()
 	test := ctx.expression()
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
 	caseOptions := ctx.caseOptions()
 	expr := ctx.factory.Case(test, caseOptions, ctx.locator, start, ctx.Pos()-start)
@@ -955,7 +900,7 @@ func (ctx *context) caseOptions() (exprs []Expression) {
 	exprs = make([]Expression, 0, 4)
 	for {
 		exprs = append(exprs, ctx.caseOption())
-		if ctx.currentToken == tokenRc {
+		if ctx.currentToken == lexer.TokenRc {
 			return
 		}
 	}
@@ -963,11 +908,11 @@ func (ctx *context) caseOptions() (exprs []Expression) {
 
 func (ctx *context) caseOption() Expression {
 	start := ctx.tokenStartPos
-	expressions := ctx.expressions(tokenColon, ctx.expression)
+	expressions := ctx.expressions(lexer.TokenColon, ctx.expression)
 	ctx.nextToken()
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	block := ctx.parse(tokenRc, false)
+	block := ctx.parse(lexer.TokenRc, false)
 	ctx.nextToken()
 	return ctx.factory.When(expressions, block, ctx.locator, start, ctx.Pos()-start)
 }
@@ -980,11 +925,11 @@ func (ctx *context) resourceExpression(start int, first Expression, form Resourc
 
 	// First attribute might be a * => operator. No attempt should be made
 	// to read it as an expression.
-	if ctx.currentToken != tokenMultiply {
+	if ctx.currentToken != lexer.TokenMultiply {
 		firstTitle = ctx.expression()
 	}
 
-	if ctx.currentToken != tokenColon {
+	if ctx.currentToken != lexer.TokenColon {
 		// Resource body without title
 		ctx.SetPos(titleStart)
 		switch ctx.resourceShape(first) {
@@ -1029,7 +974,7 @@ func (ctx *context) resourceExpression(start int, first Expression, form Resourc
 		expr = ctx.factory.Resource(form, first, bodies, ctx.locator, start, ctx.Pos()-start)
 	}
 
-	ctx.assertToken(tokenRc)
+	ctx.assertToken(lexer.TokenRc)
 	ctx.nextToken()
 	return
 }
@@ -1052,13 +997,13 @@ func (ctx *context) resourceShape(expr Expression) string {
 
 func (ctx *context) resourceBodies(title Expression) (result []Expression) {
 	result = make([]Expression, 0, 1)
-	for ctx.currentToken != tokenRc {
+	for ctx.currentToken != lexer.TokenRc {
 		result = append(result, ctx.resourceBody(title))
-		if ctx.currentToken != tokenSemicolon {
+		if ctx.currentToken != lexer.TokenSemicolon {
 			break
 		}
 		ctx.nextToken()
-		if ctx.currentToken != tokenRc {
+		if ctx.currentToken != lexer.TokenRc {
 			title = ctx.expression()
 		}
 	}
@@ -1066,7 +1011,7 @@ func (ctx *context) resourceBodies(title Expression) (result []Expression) {
 }
 
 func (ctx *context) resourceBody(title Expression) Expression {
-	if ctx.currentToken != tokenColon {
+	if ctx.currentToken != lexer.TokenColon {
 		ctx.SetPos(title.ByteOffset())
 		panic(ctx.parseIssue(parseExpectedTitle))
 	}
@@ -1079,11 +1024,11 @@ func (ctx *context) attributeOperations() (result []Expression) {
 	result = make([]Expression, 0, 5)
 	for {
 		switch ctx.currentToken {
-		case tokenSemicolon, tokenRc:
+		case lexer.TokenSemicolon, lexer.TokenRc:
 			return
 		default:
 			result = append(result, ctx.attributeOperation())
-			if ctx.currentToken != tokenComma {
+			if ctx.currentToken != lexer.TokenComma {
 				return
 			}
 			ctx.nextToken()
@@ -1093,10 +1038,10 @@ func (ctx *context) attributeOperations() (result []Expression) {
 
 func (ctx *context) attributeOperation() (op Expression) {
 	start := ctx.tokenStartPos
-	splat := ctx.currentToken == tokenMultiply
+	splat := ctx.currentToken == lexer.TokenMultiply
 	if splat {
 		ctx.nextToken()
-		ctx.assertToken(tokenFarrow)
+		ctx.assertToken(lexer.TokenFarrow)
 		ctx.nextToken()
 		return ctx.factory.AttributesOp(ctx.expression(), ctx.locator, start, ctx.Pos()-start)
 	}
@@ -1104,7 +1049,7 @@ func (ctx *context) attributeOperation() (op Expression) {
 	name := ctx.attributeName()
 
 	switch ctx.currentToken {
-	case tokenFarrow, tokenParrow:
+	case lexer.TokenFarrow, lexer.TokenParrow:
 		op := ctx.tokenString()
 		ctx.nextToken()
 		return ctx.factory.AttributeOp(op, name, ctx.expression(), ctx.locator, start, ctx.Pos()-start)
@@ -1123,7 +1068,7 @@ func (ctx *context) attributeName() string {
 func (ctx *context) identifier() (string, bool) {
 	start := ctx.tokenStartPos
 	switch ctx.currentToken {
-	case tokenIdentifier:
+	case lexer.TokenIdentifier:
 		name := ctx.tokenString()
 		ctx.nextToken()
 		return name, true
@@ -1140,7 +1085,7 @@ func (ctx *context) identifier() (string, bool) {
 func (ctx *context) identifierExpr() (Expression, bool) {
 	start := ctx.tokenStartPos
 	switch ctx.currentToken {
-	case tokenIdentifier:
+	case lexer.TokenIdentifier:
 		name := ctx.factory.QualifiedName(ctx.tokenString(), ctx.locator, start, start-ctx.Pos())
 		ctx.nextToken()
 		return name, true
@@ -1158,37 +1103,37 @@ func (ctx *context) identifierExpr() (Expression, bool) {
 func (ctx *context) collectExpression(lhs Expression) Expression {
 	var collectQuery Expression
 	queryStart := ctx.tokenStartPos
-	if ctx.currentToken == tokenLcollect {
+	if ctx.currentToken == lexer.TokenLcollect {
 		ctx.nextToken()
 		var queryExpr Expression
-		if ctx.currentToken == tokenRcollect {
+		if ctx.currentToken == lexer.TokenRcollect {
 			queryExpr = ctx.factory.Nop(ctx.locator, ctx.tokenStartPos, 0)
 		} else {
 			queryExpr = ctx.expression()
-			ctx.assertToken(tokenRcollect)
+			ctx.assertToken(lexer.TokenRcollect)
 		}
 		ctx.nextToken()
 		collectQuery = ctx.factory.VirtualQuery(queryExpr, ctx.locator, queryStart, ctx.Pos()-queryStart)
 	} else {
 		ctx.nextToken()
 		var queryExpr Expression
-		if ctx.currentToken == tokenRrcollect {
+		if ctx.currentToken == lexer.TokenRrcollect {
 			queryExpr = ctx.factory.Nop(ctx.locator, queryStart, ctx.tokenStartPos-queryStart)
 		} else {
 			queryExpr = ctx.expression()
-			ctx.assertToken(tokenRrcollect)
+			ctx.assertToken(lexer.TokenRrcollect)
 		}
 		ctx.nextToken()
 		collectQuery = ctx.factory.ExportedQuery(queryExpr, ctx.locator, queryStart, ctx.Pos()-queryStart)
 	}
 
 	var attributeOps []Expression
-	if ctx.currentToken != tokenLc {
+	if ctx.currentToken != lexer.TokenLc {
 		attributeOps = make([]Expression, 0)
 	} else {
 		ctx.nextToken()
 		attributeOps = ctx.attributeOperations()
-		ctx.assertToken(tokenRc)
+		ctx.assertToken(lexer.TokenRc)
 		ctx.nextToken()
 	}
 	return ctx.factory.Collect(lhs, collectQuery, attributeOps, ctx.locator, lhs.ByteOffset(), ctx.Pos()-lhs.ByteOffset())
@@ -1200,7 +1145,7 @@ func (ctx *context) typeAliasOrDefinition() Expression {
 	fqr, ok := typeExpr.(*QualifiedReference)
 	if !ok {
 		if _, ok = typeExpr.(*AccessExpression); ok {
-			if ctx.currentToken == tokenAssign {
+			if ctx.currentToken == lexer.TokenAssign {
 				ctx.nextToken()
 				return ctx.addDefinition(ctx.factory.TypeMapping(typeExpr, ctx.expression(), ctx.locator, start, ctx.Pos()-start))
 			}
@@ -1210,13 +1155,13 @@ func (ctx *context) typeAliasOrDefinition() Expression {
 
 	parent := ``
 	switch ctx.currentToken {
-	case tokenAssign:
+	case lexer.TokenAssign:
 		ctx.nextToken()
 		bodyStart := ctx.tokenStartPos
 		body := ctx.expression()
 		switch bt := body.(type) {
 		case *QualifiedReference:
-			if ctx.currentToken == tokenLc {
+			if ctx.currentToken == lexer.TokenLc {
 				hash := ctx.expression().(*LiteralHash)
 				if bt.name == `Object` || bt.name == `TypeSet` {
 					body = ctx.factory.Access(bt, []Expression{hash}, ctx.locator, bodyStart, ctx.Pos()-bodyStart)
@@ -1236,24 +1181,24 @@ func (ctx *context) typeAliasOrDefinition() Expression {
 			body = ctx.factory.Access(ctx.factory.QualifiedReference(`Object`, ctx.locator, bodyStart, 0), []Expression{body}, ctx.locator, bodyStart, ctx.Pos()-bodyStart)
 		}
 		return ctx.addDefinition(ctx.factory.TypeAlias(fqr.name, body, ctx.locator, start, ctx.Pos()-start))
-	case tokenInherits:
+	case lexer.TokenInherits:
 		ctx.nextToken()
 		nameExpr := ctx.typeName()
 		if nameExpr == nil {
 			panic(ctx.parseIssue(parseInheritsMustBeTypeName))
 		}
 		parent = nameExpr.(*QualifiedReference).name
-		ctx.assertToken(tokenLc)
+		ctx.assertToken(lexer.TokenLc)
 		fallthrough
 
-	case tokenLc:
+	case lexer.TokenLc:
 		ctx.nextToken()
-		body := ctx.parse(tokenRc, false)
+		body := ctx.parse(lexer.TokenRc, false)
 		ctx.nextToken() // consume TOKEN_RC
 		return ctx.addDefinition(ctx.factory.TypeDefinition(fqr.name, parent, body, ctx.locator, start, ctx.Pos()-start))
 
 	default:
-		panic(ctx.parseIssue2(lexUnexpectedToken, issue.H{`token`: tokenMap[ctx.currentToken]}))
+		panic(ctx.parseIssue2(lexUnexpectedToken, issue.H{`token`: lexer.TokenMap[ctx.currentToken]}))
 	}
 }
 
@@ -1261,14 +1206,14 @@ func (ctx *context) callFunctionExpression(functorExpr Expression) Expression {
 	var args []Expression
 	start := functorExpr.ByteOffset()
 	end := start + functorExpr.ByteLength()
-	if ctx.currentToken != tokenPipe {
+	if ctx.currentToken != lexer.TokenPipe {
 		ctx.nextToken()
 		args = ctx.arguments()
 		end = ctx.Pos()
 		ctx.nextToken()
 	}
 	var block Expression
-	if ctx.currentToken == tokenPipe {
+	if ctx.currentToken == lexer.TokenPipe {
 		block = ctx.lambda()
 		end = block.ByteOffset() + block.ByteLength()
 	}
@@ -1280,7 +1225,7 @@ func (ctx *context) callFunctionExpression(functorExpr Expression) Expression {
 
 func (ctx *context) stepStyle() StepStyle {
 	switch ctx.currentToken {
-	case tokenIdentifier:
+	case lexer.TokenIdentifier:
 		if style, ok := workflowStyles[ctx.tokenString()]; ok {
 			ctx.nextToken()
 			return style
@@ -1304,7 +1249,7 @@ func (ctx *context) stepProperty() Expression {
 	if !ok {
 		panic(ctx.parseIssue(parseExpectedAttributeName))
 	}
-	if ctx.currentToken != tokenFarrow {
+	if ctx.currentToken != lexer.TokenFarrow {
 		panic(ctx.parseIssue(parseExpectedFarrowAfterKey))
 	}
 	ctx.nextToken()
@@ -1332,7 +1277,7 @@ func (ctx *context) stepProperty() Expression {
 }
 
 func (ctx *context) stateHash(start int) []Expression {
-	entries := ctx.expressions(tokenRc, ctx.stateAttribute)
+	entries := ctx.expressions(lexer.TokenRc, ctx.stateAttribute)
 
 	// All variable references in this hash must be converted to Deferred references to prevent that evaluation happens
 	// prematurely.
@@ -1394,7 +1339,7 @@ func (ctx *context) stateAttribute() (op Expression) {
 	}
 
 	switch ctx.currentToken {
-	case tokenFarrow:
+	case lexer.TokenFarrow:
 		ctx.nextToken()
 		return ctx.factory.KeyedEntry(name, ctx.expression(), ctx.locator, start, ctx.Pos()-start)
 	default:
@@ -1404,7 +1349,7 @@ func (ctx *context) stateAttribute() (op Expression) {
 
 func (ctx *context) stepExpression() Expression {
 	start := ctx.Pos()
-	if ctx.currentToken == tokenFunction {
+	if ctx.currentToken == lexer.TokenFunction {
 		return ctx.functionDefinition()
 	}
 	style := ctx.stepStyle()
@@ -1414,7 +1359,7 @@ func (ctx *context) stepExpression() Expression {
 
 func (ctx *context) activities() []Expression {
 	activities := make([]Expression, 0)
-	for ctx.currentToken != tokenRc {
+	for ctx.currentToken != lexer.TokenRc {
 		activities = append(activities, ctx.stepExpression())
 	}
 	ctx.nextToken()
@@ -1427,9 +1372,9 @@ func (ctx *context) stepDeclaration(start int, style StepStyle, name string, atT
 		ctx.nameStack = append(ctx.nameStack, name)
 	}
 	hstart := ctx.tokenStartPos
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	propEntries := ctx.expressions(tokenRc, ctx.stepProperty)
+	propEntries := ctx.expressions(lexer.TokenRc, ctx.stepProperty)
 	hEnd := ctx.Pos()
 	ctx.nextToken()
 
@@ -1437,15 +1382,15 @@ func (ctx *context) stepDeclaration(start int, style StepStyle, name string, atT
 	l := ctx.locator
 
 	iterName := name
-	if ctx.currentToken == tokenVariable {
+	if ctx.currentToken == lexer.TokenVariable {
 		iterName = ctx.tokenString()
 		ctx.nextToken()
-		ctx.assertToken(tokenAssign)
+		ctx.assertToken(lexer.TokenAssign)
 		ctx.nextToken()
-		ctx.assertToken(tokenIdentifier)
+		ctx.assertToken(lexer.TokenIdentifier)
 	}
 
-	if ctx.currentToken == tokenIdentifier {
+	if ctx.currentToken == lexer.TokenIdentifier {
 		switch ctx.tokenString() {
 		case `times`, `range`, `each`:
 			iterFunc := ctx.tokenString()
@@ -1490,7 +1435,7 @@ func (ctx *context) stepDeclaration(start int, style StepStyle, name string, atT
 
 	switch style {
 	case StepStyleWorkflow:
-		if ctx.currentToken == tokenLc {
+		if ctx.currentToken == lexer.TokenLc {
 			hstart := ctx.tokenStartPos
 			ctx.nextToken()
 			activities := ctx.activities()
@@ -1502,7 +1447,7 @@ func (ctx *context) stepDeclaration(start int, style StepStyle, name string, atT
 		// Pop name stack
 		ctx.nameStack = ctx.nameStack[:len(ctx.nameStack)-1]
 	case StepStyleResource:
-		if ctx.currentToken == tokenLc {
+		if ctx.currentToken == lexer.TokenLc {
 			hstart := ctx.tokenStartPos
 			ctx.nextToken()
 			entries := ctx.stateHash(hstart)
@@ -1512,9 +1457,9 @@ func (ctx *context) stepDeclaration(start int, style StepStyle, name string, atT
 			ctx.nextToken()
 		}
 	default: // StepStyleAction or StepStyleStateHandler
-		ctx.assertToken(tokenLc)
+		ctx.assertToken(lexer.TokenLc)
 		ctx.nextToken()
-		block = ctx.parse(tokenRc, false)
+		block = ctx.parse(lexer.TokenRc, false)
 		ctx.nextToken()
 	}
 	step := f.Step(ctx.qualifiedName(name), style, properties, block, l, start, ctx.Pos()-start)
@@ -1529,16 +1474,16 @@ func (ctx *context) lambda() (result Expression) {
 	parameterList := ctx.lambdaParameterList()
 	ctx.nextToken()
 	var returnType Expression
-	if ctx.currentToken == tokenRshift {
+	if ctx.currentToken == lexer.TokenRshift {
 		ctx.nextToken()
 		returnType = ctx.parameterType()
 	}
 
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	block := ctx.parse(tokenRc, false)
+	block := ctx.parse(lexer.TokenRc, false)
 	result = ctx.factory.Lambda(parameterList, block, returnType, ctx.locator, start, ctx.Pos()-start)
-	ctx.nextToken() // consume TOKEN_RC
+	ctx.nextToken() // consume lexer.TOKEN_RC
 	return
 }
 
@@ -1587,7 +1532,7 @@ func (ctx *context) newHashWithoutBraces(entries []Expression) Expression {
 }
 
 func (ctx *context) arguments() (result []Expression) {
-	return ctx.joinHashEntries(ctx.expressions(tokenRp, ctx.argument))
+	return ctx.joinHashEntries(ctx.expressions(lexer.TokenRp, ctx.argument))
 }
 
 func (ctx *context) functionDefinition() Expression {
@@ -1595,7 +1540,7 @@ func (ctx *context) functionDefinition() Expression {
 	ctx.nextToken()
 	var name string
 	switch ctx.currentToken {
-	case tokenIdentifier, tokenTypeName:
+	case lexer.TokenIdentifier, lexer.TokenTypeName:
 		name = ctx.tokenString()
 	default:
 		ctx.SetPos(ctx.tokenStartPos)
@@ -1606,7 +1551,7 @@ func (ctx *context) functionDefinition() Expression {
 
 	var parameterList []Expression
 	switch ctx.currentToken {
-	case tokenLp, tokenWslp:
+	case lexer.TokenLp, lexer.TokenWslp:
 		parameterList = ctx.parameterList()
 		ctx.nextToken()
 	default:
@@ -1614,15 +1559,15 @@ func (ctx *context) functionDefinition() Expression {
 	}
 
 	var returnType Expression
-	if ctx.currentToken == tokenRshift {
+	if ctx.currentToken == lexer.TokenRshift {
 		ctx.nextToken()
 		returnType = ctx.parameterType()
 	}
 
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	block := ctx.parse(tokenRc, false)
-	ctx.nextToken() // consume TOKEN_RC
+	block := ctx.parse(lexer.TokenRc, false)
+	ctx.nextToken() // consume lexer.TOKEN_RC
 	return ctx.addDefinition(ctx.factory.Function(name, parameterList, block, returnType, ctx.locator, start, ctx.Pos()-start))
 }
 
@@ -1631,7 +1576,7 @@ func (ctx *context) planDefinition() Expression {
 	ctx.nextToken()
 	var name string
 	switch ctx.currentToken {
-	case tokenIdentifier, tokenTypeName:
+	case lexer.TokenIdentifier, lexer.TokenTypeName:
 		name = ctx.tokenString()
 	default:
 		ctx.SetPos(ctx.tokenStartPos)
@@ -1644,7 +1589,7 @@ func (ctx *context) planDefinition() Expression {
 
 	var parameterList []Expression
 	switch ctx.currentToken {
-	case tokenLp, tokenWslp:
+	case lexer.TokenLp, lexer.TokenWslp:
 		parameterList = ctx.parameterList()
 		ctx.nextToken()
 	default:
@@ -1652,15 +1597,15 @@ func (ctx *context) planDefinition() Expression {
 	}
 
 	var returnType Expression
-	if ctx.currentToken == tokenRshift {
+	if ctx.currentToken == lexer.TokenRshift {
 		ctx.nextToken()
 		returnType = ctx.parameterType()
 	}
 
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	block := ctx.parse(tokenRc, false)
-	ctx.nextToken() // consume TOKEN_RC
+	block := ctx.parse(lexer.TokenRc, false)
+	ctx.nextToken() // consume lexer.TOKEN_RC
 
 	// Pop namestack
 	ctx.nameStack = ctx.nameStack[:len(ctx.nameStack)-1]
@@ -1672,13 +1617,13 @@ func (ctx *context) nodeDefinition() Expression {
 	ctx.nextToken()
 	hostnames := ctx.hostnames()
 	var nodeParent Expression
-	if ctx.currentToken == tokenInherits {
+	if ctx.currentToken == lexer.TokenInherits {
 		ctx.nextToken()
 		nodeParent = ctx.hostname()
 	}
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	block := ctx.parse(tokenRc, false)
+	block := ctx.parse(lexer.TokenRc, false)
 	ctx.nextToken()
 	return ctx.addDefinition(ctx.factory.Node(hostnames, nodeParent, block, ctx.locator, start, ctx.Pos()-start))
 }
@@ -1687,12 +1632,12 @@ func (ctx *context) hostnames() (hostnames []Expression) {
 	hostnames = make([]Expression, 0, 4)
 	for {
 		hostnames = append(hostnames, ctx.hostname())
-		if ctx.currentToken != tokenComma {
+		if ctx.currentToken != lexer.TokenComma {
 			return
 		}
 		ctx.nextToken()
 		switch ctx.currentToken {
-		case tokenInherits, tokenLc:
+		case lexer.TokenInherits, lexer.TokenLc:
 			return
 		}
 	}
@@ -1701,18 +1646,18 @@ func (ctx *context) hostnames() (hostnames []Expression) {
 func (ctx *context) hostname() (hostname Expression) {
 	start := ctx.tokenStartPos
 	switch ctx.currentToken {
-	case tokenIdentifier, tokenTypeName, tokenInteger, tokenFloat:
+	case lexer.TokenIdentifier, lexer.TokenTypeName, lexer.TokenInteger, lexer.TokenFloat:
 		hostname = ctx.dottedName()
-	case tokenRegexp:
+	case lexer.TokenRegexp:
 		hostname = ctx.factory.Regexp(ctx.tokenString(), ctx.locator, start, ctx.Pos()-start)
 		ctx.nextToken()
-	case tokenString:
+	case lexer.TokenString:
 		hostname = ctx.factory.String(ctx.tokenString(), ctx.locator, start, ctx.Pos()-start)
 		ctx.nextToken()
-	case tokenDefault:
+	case lexer.TokenDefault:
 		hostname = ctx.factory.Default(ctx.locator, start, ctx.Pos()-start)
 		ctx.nextToken()
-	case tokenConcatenatedString, tokenHeredoc:
+	case lexer.TokenConcatenatedString, lexer.TokenHeredoc:
 		hostname = ctx.tokenValue.(Expression)
 		ctx.nextToken()
 	default:
@@ -1726,18 +1671,18 @@ func (ctx *context) dottedName() Expression {
 	names := make([]string, 0, 8)
 	for {
 		switch ctx.currentToken {
-		case tokenIdentifier, tokenTypeName:
+		case lexer.TokenIdentifier, lexer.TokenTypeName:
 			names = append(names, ctx.tokenString())
-		case tokenInteger:
+		case lexer.TokenInteger:
 			names = append(names, strconv.FormatInt(ctx.tokenValue.(int64), 10))
-		case tokenFloat:
+		case lexer.TokenFloat:
 			names = append(names, strconv.FormatFloat(ctx.tokenValue.(float64), 'g', -1, 64))
 		default:
 			panic(ctx.parseIssue(parseExpectedNameOrNumberAfterDot))
 		}
 
 		ctx.nextToken()
-		if ctx.currentToken != tokenDot {
+		if ctx.currentToken != lexer.TokenDot {
 			return ctx.factory.String(strings.Join(names, `.`), ctx.locator, start, ctx.Pos()-start)
 		}
 		ctx.nextToken()
@@ -1746,9 +1691,9 @@ func (ctx *context) dottedName() Expression {
 
 func (ctx *context) parameterList() (result []Expression) {
 	switch ctx.currentToken {
-	case tokenLp, tokenWslp:
+	case lexer.TokenLp, lexer.TokenWslp:
 		ctx.nextToken()
-		return ctx.expressions(tokenRp, ctx.parameter)
+		return ctx.expressions(lexer.TokenRp, ctx.parameter)
 	default:
 		return []Expression{}
 	}
@@ -1756,23 +1701,23 @@ func (ctx *context) parameterList() (result []Expression) {
 
 func (ctx *context) lambdaParameterList() (result []Expression) {
 	ctx.nextToken()
-	return ctx.expressions(tokenPipeEnd, ctx.parameter)
+	return ctx.expressions(lexer.TokenPipeEnd, ctx.parameter)
 }
 
 func (ctx *context) parameter() Expression {
 	var typeExpr, defaultExpression Expression
 
 	start := ctx.tokenStartPos
-	if ctx.currentToken == tokenTypeName {
+	if ctx.currentToken == lexer.TokenTypeName {
 		typeExpr = ctx.parameterType()
 	}
 
-	capturesRest := ctx.currentToken == tokenMultiply
+	capturesRest := ctx.currentToken == lexer.TokenMultiply
 	if capturesRest {
 		ctx.nextToken()
 	}
 
-	if ctx.currentToken != tokenVariable {
+	if ctx.currentToken != lexer.TokenVariable {
 		panic(ctx.parseIssue(parseExpectedVariable))
 	}
 	variable, ok := ctx.tokenValue.(string)
@@ -1781,7 +1726,7 @@ func (ctx *context) parameter() Expression {
 	}
 	ctx.nextToken()
 
-	if ctx.currentToken == tokenAssign {
+	if ctx.currentToken == lexer.TokenAssign {
 		ctx.nextToken()
 		defaultExpression = ctx.expression()
 	}
@@ -1792,9 +1737,9 @@ func (ctx *context) parameter() Expression {
 
 func (ctx *context) returnParameters() (result []Expression) {
 	switch ctx.currentToken {
-	case tokenLp, tokenWslp:
+	case lexer.TokenLp, lexer.TokenWslp:
 		ctx.nextToken()
-		return ctx.expressions(tokenRp, ctx.returnParameter)
+		return ctx.expressions(lexer.TokenRp, ctx.returnParameter)
 	default:
 		return []Expression{}
 	}
@@ -1813,10 +1758,10 @@ func (ctx *context) returnParameter() Expression {
 
 	start := ctx.tokenStartPos
 
-	if ctx.currentToken == tokenTypeName {
+	if ctx.currentToken == lexer.TokenTypeName {
 		typeExpr = ctx.parameterType()
 	}
-	if ctx.currentToken != tokenVariable {
+	if ctx.currentToken != lexer.TokenVariable {
 		panic(ctx.parseIssue(parseExpectedVariable))
 	}
 	variable, ok := ctx.tokenValue.(string)
@@ -1825,13 +1770,13 @@ func (ctx *context) returnParameter() Expression {
 	}
 	ctx.nextToken()
 
-	if ctx.currentToken == tokenAssign {
+	if ctx.currentToken == lexer.TokenAssign {
 		ctx.nextToken()
 		switch ctx.currentToken {
-		case tokenLp, tokenWslp:
+		case lexer.TokenLp, lexer.TokenWslp:
 			ps := ctx.tokenStartPos
 			ctx.nextToken()
-			defaultExpression = ctx.factory.Array(ctx.expressions(tokenRp, ctx.attributeAlias), ctx.locator, ps, ps-ctx.Pos())
+			defaultExpression = ctx.factory.Array(ctx.expressions(lexer.TokenRp, ctx.attributeAlias), ctx.locator, ps, ps-ctx.Pos())
 			ctx.nextToken()
 		default:
 			defaultExpression = ctx.attributeAlias()
@@ -1849,7 +1794,7 @@ func (ctx *context) parameterType() Expression {
 		panic(ctx.parseIssue(parseExpectedTypeName))
 	}
 
-	if ctx.currentToken == tokenLb {
+	if ctx.currentToken == lexer.TokenLb {
 		ctx.nextToken()
 		typeArgs := ctx.arrayExpression()
 		expr := ctx.factory.Access(typeName, typeArgs, ctx.locator, start, ctx.Pos()-start)
@@ -1860,7 +1805,7 @@ func (ctx *context) parameterType() Expression {
 }
 
 func (ctx *context) typeName() Expression {
-	if ctx.currentToken == tokenTypeName {
+	if ctx.currentToken == lexer.TokenTypeName {
 		name := ctx.factory.QualifiedReference(ctx.tokenString(), ctx.locator, ctx.tokenStartPos, ctx.Pos()-ctx.tokenStartPos)
 		ctx.nextToken()
 		return name
@@ -1876,7 +1821,7 @@ func (ctx *context) classExpression(start int) Expression {
 
 	var parameterList []Expression
 	switch ctx.currentToken {
-	case tokenLp, tokenWslp:
+	case lexer.TokenLp, lexer.TokenWslp:
 		parameterList = ctx.parameterList()
 		ctx.nextToken()
 	default:
@@ -1884,18 +1829,18 @@ func (ctx *context) classExpression(start int) Expression {
 	}
 
 	var parent string
-	if ctx.currentToken == tokenInherits {
+	if ctx.currentToken == lexer.TokenInherits {
 		ctx.nextToken()
-		if ctx.currentToken == tokenDefault {
-			parent = tokenMap[tokenDefault]
+		if ctx.currentToken == lexer.TokenDefault {
+			parent = lexer.TokenMap[lexer.TokenDefault]
 			ctx.nextToken()
 		} else {
 			parent = ctx.className()
 		}
 	}
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	body := ctx.parse(tokenRc, false)
+	body := ctx.parse(lexer.TokenRc, false)
 	ctx.nextToken()
 
 	// Pop namestack
@@ -1905,14 +1850,14 @@ func (ctx *context) classExpression(start int) Expression {
 
 func (ctx *context) className() (name string) {
 	switch ctx.currentToken {
-	case tokenTypeName, tokenIdentifier:
+	case lexer.TokenTypeName, lexer.TokenIdentifier:
 		name = ctx.tokenString()
 		ctx.nextToken()
 		return
-	case tokenString, tokenConcatenatedString:
+	case lexer.TokenString, lexer.TokenConcatenatedString:
 		ctx.SetPos(ctx.tokenStartPos)
 		panic(ctx.parseIssue(parseQuotedNotValidName))
-	case tokenClass:
+	case lexer.TokenClass:
 		ctx.SetPos(ctx.tokenStartPos)
 		panic(ctx.parseIssue(parseClassNotValidHere))
 	default:
@@ -1922,9 +1867,9 @@ func (ctx *context) className() (name string) {
 }
 
 func (ctx *context) keyword() (word string, ok bool) {
-	if ctx.currentToken != tokenBoolean {
-		str := tokenMap[ctx.currentToken]
-		if _, ok = keywords[str]; ok {
+	if ctx.currentToken != lexer.TokenBoolean {
+		str := lexer.TokenMap[ctx.currentToken]
+		if _, ok = lexer.Keywords[str]; ok {
 			word = str
 		}
 	}
@@ -1939,10 +1884,10 @@ func (ctx *context) capabilityMapping(component Expression, kind string) Express
 	start := ctx.tokenStartPos
 	ctx.nextToken()
 	capName := ctx.className()
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
 	mappings := ctx.attributeOperations()
-	ctx.assertToken(tokenRc)
+	ctx.assertToken(lexer.TokenRc)
 	ctx.nextToken()
 
 	switch ct := component.(type) {
@@ -1958,9 +1903,9 @@ func (ctx *context) capabilityMapping(component Expression, kind string) Express
 func (ctx *context) siteDefinition() Expression {
 	start := ctx.tokenStartPos
 	ctx.nextToken()
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	block := ctx.parse(tokenRc, false)
+	block := ctx.parse(lexer.TokenRc, false)
 	ctx.nextToken()
 	return ctx.addDefinition(ctx.factory.Site(block, ctx.locator, start, ctx.Pos()-start))
 }
@@ -1972,19 +1917,19 @@ func (ctx *context) resourceDefinition(resourceToken int) Expression {
 
 	var parameterList []Expression
 	switch ctx.currentToken {
-	case tokenLp, tokenWslp:
+	case lexer.TokenLp, lexer.TokenWslp:
 		parameterList = ctx.parameterList()
 		ctx.nextToken()
 	default:
 		parameterList = []Expression{}
 	}
 
-	ctx.assertToken(tokenLc)
+	ctx.assertToken(lexer.TokenLc)
 	ctx.nextToken()
-	body := ctx.parse(tokenRc, false)
+	body := ctx.parse(lexer.TokenRc, false)
 	ctx.nextToken()
 	var def Expression
-	if resourceToken == tokenApplication {
+	if resourceToken == lexer.TokenApplication {
 		def = ctx.factory.Application(name, parameterList, body, ctx.locator, start, ctx.Pos()-start)
 	} else {
 		def = ctx.factory.Definition(name, parameterList, body, ctx.locator, start, ctx.Pos()-start)

@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/lyraproj/issue/issue"
+	"github.com/lyraproj/puppet-parser/lexer"
 	"github.com/lyraproj/puppet-parser/pn"
 )
 
@@ -584,7 +585,7 @@ func (e *Locator) PosOnLine(offset int) int {
 func (e *Locator) getLineIndex() []int {
 	if e.lineIndex == nil {
 		li := append(make([]int, 0, 32), 0)
-		rdr := NewStringReader(e.string)
+		rdr := lexer.NewStringReader(e.string)
 		for c, _ := rdr.Next(); c != 0; c, _ = rdr.Next() {
 			if c == '\n' {
 				li = append(li, rdr.Pos())

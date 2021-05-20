@@ -7,9 +7,55 @@ import (
 	"unicode/utf8"
 
 	"github.com/lyraproj/issue/issue"
+	"github.com/lyraproj/puppet-parser/lexer"
 )
 
 // Recursive descent lexer for the Puppet language.
+
+type defaultLexer struct {
+	context
+}
+
+func (l *defaultLexer) CurrentToken() int {
+	return l.context.currentToken
+}
+
+func (l *defaultLexer) NextToken() int {
+	l.context.nextToken()
+	return l.context.currentToken
+}
+
+func (l *defaultLexer) TokenString() string {
+	return l.context.tokenString()
+}
+
+func (l *defaultLexer) TokenValue() interface{} {
+	return l.context.tokenValue
+}
+
+func (l *defaultLexer) TokenStartPos() int {
+	return l.context.tokenStartPos
+}
+
+func (l *defaultLexer) AssertToken(token int) {
+	l.context.assertToken(token)
+}
+
+func (l *defaultLexer) Locator() *lexer.Locator {
+	return l.Locator()
+}
+
+func NewSimpleLexer(filename string, source string) lexer.Lexer {
+	// Essentially a lexer that has no knowledge of interpolations
+	return &defaultLexer{context{
+		StringReader:          lexer.NewStringReader(source),
+		factory:               nil,
+		locator:               &Locator{string: source, file: filename},
+		handleBacktickStrings: false,
+		handleHexEscapes:      false,
+		tasks:                 false,
+		workflow:              false}}
+}
 
 type location struct {
 	locator    *Locator
@@ -36,277 +82,12 @@ func (ctx *context) parseIssue2(issueCode issue.Code, args issue.H) issue.Report
 	return issue.NewReported(issueCode, issue.SeverityError, args, &location{ctx.locator, ctx.Pos()})
 }
 
-const (
-	tokenEnd = 0
+var DefaultInstance = defaultTokenValue{}
 
-	// Binary ops
-	tokenAssign         = 1
-	tokenAddAssign      = 2
-	tokenSubtractAssign = 3
-
-	tokenMultiply  = 10
-	tokenDivide    = 11
-	tokenRemainder = 12
-	tokenSubtract  = 13
-	tokenAdd       = 14
-
-	tokenLshift = 20
-	tokenRshift = 21
-
-	tokenEqual        = 30
-	tokenNotEqual     = 31
-	tokenLess         = 32
-	tokenLessEqual    = 33
-	tokenGreater      = 34
-	tokenGreaterEqual = 35
-
-	tokenMatch    = 40
-	tokenNotMatch = 41
-
-	tokenLcollect  = 50
-	tokenLlcollect = 51
-
-	tokenRcollect  = 60
-	tokenRrcollect = 61
-
-	tokenFarrow = 70
-	tokenParrow = 71
-
-	tokenInEdge     = 72
-	tokenInEdgeSub  = 73
-	tokenOutEdge    = 74
-	tokenOutEdgeSub = 75
-
-	// Unary ops
-	tokenNot  = 80
-	tokenAt   = 81
-	tokenAtat = 82
-
-	// ()
-	tokenLp   = 90
-	tokenWslp = 91
-	tokenRp   = 92
-
-	// []
-	tokenLb        = 100
-	tokenListstart = 101
-	tokenRb        = 102
-
-	// {}
-	tokenLc   = 110
-	tokenSelc = 111
-	tokenRc   = 112
-
-	// | |
-	tokenPipe    = 120
-	tokenPipeEnd = 121
-
-	// EPP
-	tokenEppEnd       = 130
-	tokenEppEndTrim   = 131
-	tokenRenderExpr   = 132
-	tokenRenderString = 133
-
-	// Separators
-	tokenComma     = 140
-	tokenDot       = 141
-	tokenQmark     = 142
-	tokenColon     = 143
-	tokenSemicolon = 144
-
-	// Strings with semantics
-	tokenIdentifier         = 150
-	tokenString             = 151
-	tokenInteger            = 152
-	tokenFloat              = 153
-	tokenBoolean            = 154
-	tokenConcatenatedString = 155
-	tokenHeredoc            = 156
-	tokenVariable           = 157
-	tokenRegexp             = 158
-	tokenTypeName           = 159
-
-	// Keywords
-	tokenAnd         = 200
-	tokenApplication = 201
-	tokenAttr        = 202
-	tokenCase        = 203
-	tokenClass       = 204
-	tokenConsumes    = 205
-	tokenDefault     = 206
-	tokenDefine      = 207
-	tokenFunction    = 208
-	tokenIf          = 209
-	tokenIn          = 210
-	tokenInherits    = 211
-	tokenElse        = 212
-	tokenElsif       = 213
-	tokenNode        = 214
-	tokenOr          = 215
-	tokenPlan        = 216
-	tokenPrivate     = 217
-	tokenProduces    = 218
-	tokenSite        = 219
-	tokenType        = 220
-	tokenUndef       = 221
-	tokenUnless      = 222
-)
-
-func IsKeywordToken(token int) bool {
-	return token >= tokenAnd && token <= tokenUnless
-}
-
-var tokenMap = map[int]string{
-	tokenEnd: `EOF`,
-
-	// Binary ops
-	tokenAssign:         `=`,
-	tokenAddAssign:      `+=`,
-	tokenSubtractAssign: `-=`,
-
-	tokenMultiply:  `*`,
-	tokenDivide:    `/`,
-	tokenRemainder: `%`,
-	tokenSubtract:  `-`,
-	tokenAdd:       `+`,
-
-	tokenLshift: `<<`,
-	tokenRshift: `>>`,
-
-	tokenEqual:        `==`,
-	tokenNotEqual:     `!=`,
-	tokenLess:         `<`,
-	tokenLessEqual:    `<=`,
-	tokenGreater:      `>`,
-	tokenGreaterEqual: `>=`,
-
-	tokenMatch:    `=~`,
-	tokenNotMatch: `!~`,
-
-	tokenLcollect:  `<|`,
-	tokenLlcollect: `<<|`,
-
-	tokenRcollect:  `|>`,
-	tokenRrcollect: `|>>`,
-
-	tokenFarrow: `=>`,
-	tokenParrow: `+>`,
-
-	tokenInEdge:     `->`,
-	tokenInEdgeSub:  `~>`,
-	tokenOutEdge:    `<-`,
-	tokenOutEdgeSub: `<~`,
-
-	// Unary ops
-	tokenNot:  `!`,
-	tokenAt:   `@`,
-	tokenAtat: `@@`,
-
-	tokenComma: `,`,
-
-	// ()
-	tokenLp:   `(`,
-	tokenWslp: `(`,
-	tokenRp:   `)`,
-
-	// []
-	tokenLb:        `[`,
-	tokenListstart: `[`,
-	tokenRb:        `]`,
-
-	// {}
-	tokenLc:   `{`,
-	tokenSelc: `{`,
-	tokenRc:   `}`,
-
-	// | |
-	tokenPipe:    `|`,
-	tokenPipeEnd: `|`,
-
-	// EPP
-	tokenEppEnd:       `%>`,
-	tokenEppEndTrim:   `-%>`,
-	tokenRenderExpr:   `<%=`,
-	tokenRenderString: `epp text`,
-
-	// Separators
-	tokenDot:       `.`,
-	tokenQmark:     `?`,
-	tokenColon:     `:`,
-	tokenSemicolon: `;`,
-
-	// Strings with semantics
-	tokenIdentifier:         `identifier`,
-	tokenString:             `string literal`,
-	tokenInteger:            `integer literal`,
-	tokenFloat:              `float literal`,
-	tokenBoolean:            `boolean literal`,
-	tokenConcatenatedString: `dq string literal`,
-	tokenHeredoc:            `heredoc`,
-	tokenVariable:           `variable`,
-	tokenRegexp:             `regexp`,
-	tokenTypeName:           `type name`,
-
-	// Keywords
-	tokenAnd:         `and`,
-	tokenApplication: `application`,
-	tokenAttr:        `attr`,
-	tokenCase:        `case`,
-	tokenClass:       `class`,
-	tokenConsumes:    `consumes`,
-	tokenDefault:     `default`,
-	tokenDefine:      `define`,
-	tokenFunction:    `function`,
-	tokenIf:          `if`,
-	tokenIn:          `in`,
-	tokenInherits:    `inherits`,
-	tokenElse:        `else`,
-	tokenElsif:       `elsif`,
-	tokenNode:        `node`,
-	tokenOr:          `or`,
-	tokenPlan:        `plan`,
-	tokenPrivate:     `private`,
-	tokenProduces:    `produces`,
-	tokenSite:        `site`,
-	tokenType:        `type`,
-	tokenUndef:       `undef`,
-	tokenUnless:      `unless`,
-}
-
-var keywords = map[string]int{
-	tokenMap[tokenApplication]: tokenApplication,
-	tokenMap[tokenAnd]:         tokenAnd,
-	tokenMap[tokenAttr]:        tokenAttr,
-	tokenMap[tokenCase]:        tokenCase,
-	tokenMap[tokenClass]:       tokenClass,
-	tokenMap[tokenConsumes]:    tokenConsumes,
-	tokenMap[tokenDefault]:     tokenDefault,
-	tokenMap[tokenDefine]:      tokenDefine,
-	`false`:                    tokenBoolean,
-	tokenMap[tokenFunction]:    tokenFunction,
-	tokenMap[tokenElse]:        tokenElse,
-	tokenMap[tokenElsif]:       tokenElsif,
-	tokenMap[tokenIf]:          tokenIf,
-	tokenMap[tokenIn]:          tokenIn,
-	tokenMap[tokenInherits]:    tokenInherits,
-	tokenMap[tokenNode]:        tokenNode,
-	tokenMap[tokenOr]:          tokenOr,
-	tokenMap[tokenPlan]:        tokenPlan,
-	tokenMap[tokenPrivate]:     tokenPrivate,
-	tokenMap[tokenProduces]:    tokenProduces,
-	tokenMap[tokenSite]:        tokenSite,
-	`true`:                     tokenBoolean,
-	tokenMap[tokenType]:        tokenType,
-	tokenMap[tokenUndef]:       tokenUndef,
-	tokenMap[tokenUnless]:      tokenUnless,
-}
-
-var DefaultInstance = Default{}
-
-type Default struct{}
+type defaultTokenValue struct{}
 
 type context struct {
-	stringReader
+	lexer.StringReader
 	locator               *Locator
 	eppMode               bool
 	handleBacktickStrings bool
@@ -367,55 +148,55 @@ func (ctx *context) nextToken() {
 			panic(ctx.parseIssue(lexDigitExpected))
 		}
 		v, _ := strconv.ParseInt(ctx.From(start), 10, 64)
-		ctx.settokenValue(tokenInteger, v)
+		ctx.settokenValue(lexer.TokenInteger, v)
 		ctx.radix = 10
 
 	case 'A' <= c && c <= 'Z':
-		ctx.consumeQualifiedName(start, tokenTypeName)
+		ctx.consumeQualifiedName(start, lexer.TokenTypeName)
 
 	case 'a' <= c && c <= 'z':
-		ctx.consumeQualifiedName(start, tokenIdentifier)
+		ctx.consumeQualifiedName(start, lexer.TokenIdentifier)
 
 	default:
 		switch c {
 		case 0:
-			ctx.setToken(tokenEnd)
+			ctx.setToken(lexer.TokenEnd)
 		case '=':
 			c, sz = ctx.Peek()
 			switch c {
 			case '=':
 				ctx.Advance(sz)
-				ctx.setToken(tokenEqual)
+				ctx.setToken(lexer.TokenEqual)
 			case '~':
 				ctx.Advance(sz)
-				ctx.setToken(tokenMatch)
+				ctx.setToken(lexer.TokenMatch)
 			case '>':
 				ctx.Advance(sz)
-				ctx.setToken(tokenFarrow)
+				ctx.setToken(lexer.TokenFarrow)
 			default:
-				ctx.setToken(tokenAssign)
+				ctx.setToken(lexer.TokenAssign)
 			}
 		case '{':
-			if ctx.currentToken == tokenQmark {
-				ctx.setToken(tokenSelc)
+			if ctx.currentToken == lexer.TokenQmark {
+				ctx.setToken(lexer.TokenSelc)
 			} else {
-				ctx.setToken(tokenLc)
+				ctx.setToken(lexer.TokenLc)
 			}
 
 		case '}':
-			ctx.setToken(tokenRc)
+			ctx.setToken(lexer.TokenRc)
 
 		case '[':
 			// If token is preceded by whitespace or if it's the first token to be parsed, then it's a
 			// list rather than parameters to an access expression
 			if scanStart < start || start == 0 {
-				ctx.setToken(tokenListstart)
+				ctx.setToken(lexer.TokenListstart)
 				break
 			}
-			ctx.setToken(tokenLb)
+			ctx.setToken(lexer.TokenLb)
 
 		case ']':
-			ctx.setToken(tokenRb)
+			ctx.setToken(lexer.TokenRb)
 
 		case '(':
 			// If token is first on line or only preceded by whitespace, then it is not start of parameters
@@ -425,36 +206,36 @@ func (ctx *context) nextToken() {
 			_, firstNonWhite := ctx.skipWhite(false)
 			ctx.SetPos(savePos)
 			if firstNonWhite == start {
-				ctx.setToken(tokenWslp)
+				ctx.setToken(lexer.TokenWslp)
 			} else {
-				ctx.setToken(tokenLp)
+				ctx.setToken(lexer.TokenLp)
 			}
 
 		case ')':
-			ctx.setToken(tokenRp)
+			ctx.setToken(lexer.TokenRp)
 
 		case ',':
-			ctx.setToken(tokenComma)
+			ctx.setToken(lexer.TokenComma)
 
 		case ';':
-			ctx.setToken(tokenSemicolon)
+			ctx.setToken(lexer.TokenSemicolon)
 
 		case '.':
-			ctx.setToken(tokenDot)
+			ctx.setToken(lexer.TokenDot)
 
 		case '?':
-			ctx.setToken(tokenQmark)
+			ctx.setToken(lexer.TokenQmark)
 
 		case ':':
-			ctx.setToken(tokenColon)
+			ctx.setToken(lexer.TokenColon)
 			c, sz = ctx.Peek()
 			if c == ':' {
 				ctx.Advance(sz)
 				c, _ = ctx.Next()
 				if isUppercaseLetter(c) {
-					ctx.consumeQualifiedName(start, tokenTypeName)
+					ctx.consumeQualifiedName(start, lexer.TokenTypeName)
 				} else if isLowercaseLetter(c) {
-					ctx.consumeQualifiedName(start, tokenIdentifier)
+					ctx.consumeQualifiedName(start, lexer.TokenIdentifier)
 				} else {
 					ctx.SetPos(start)
 					panic(ctx.parseIssue(lexDoubleColonNotFollowedByName))
@@ -466,10 +247,10 @@ func (ctx *context) nextToken() {
 			switch c {
 			case '=':
 				ctx.Advance(sz)
-				ctx.setToken(tokenSubtractAssign)
+				ctx.setToken(lexer.TokenSubtractAssign)
 			case '>':
 				ctx.Advance(sz)
-				ctx.setToken(tokenInEdge)
+				ctx.setToken(lexer.TokenInEdge)
 			case '%':
 				if ctx.eppMode {
 					ctx.Advance(sz)
@@ -491,26 +272,26 @@ func (ctx *context) nextToken() {
 				fallthrough
 
 			default:
-				ctx.setToken(tokenSubtract)
+				ctx.setToken(lexer.TokenSubtract)
 			}
 
 		case '+':
 			c, sz = ctx.Peek()
 			if c == '=' {
 				ctx.Advance(sz)
-				ctx.setToken(tokenAddAssign)
+				ctx.setToken(lexer.TokenAddAssign)
 			} else if c == '>' {
 				ctx.Advance(sz)
-				ctx.setToken(tokenParrow)
+				ctx.setToken(lexer.TokenParrow)
 			} else {
-				ctx.setToken(tokenAdd)
+				ctx.setToken(lexer.TokenAdd)
 			}
 
 		case '*':
-			ctx.setToken(tokenMultiply)
+			ctx.setToken(lexer.TokenMultiply)
 
 		case '%':
-			ctx.setToken(tokenRemainder)
+			ctx.setToken(lexer.TokenRemainder)
 			if ctx.eppMode {
 				c, sz = ctx.Peek()
 				if c == '>' {
@@ -523,31 +304,31 @@ func (ctx *context) nextToken() {
 			c, sz = ctx.Peek()
 			if c == '=' {
 				ctx.Advance(sz)
-				ctx.setToken(tokenNotEqual)
+				ctx.setToken(lexer.TokenNotEqual)
 			} else if c == '~' {
 				ctx.Advance(sz)
-				ctx.setToken(tokenNotMatch)
+				ctx.setToken(lexer.TokenNotMatch)
 			} else {
-				ctx.setToken(tokenNot)
+				ctx.setToken(lexer.TokenNot)
 			}
 
 		case '>':
 			c, sz = ctx.Peek()
 			if c == '=' {
 				ctx.Advance(sz)
-				ctx.setToken(tokenGreaterEqual)
+				ctx.setToken(lexer.TokenGreaterEqual)
 			} else if c == '>' {
 				ctx.Advance(sz)
-				ctx.setToken(tokenRshift)
+				ctx.setToken(lexer.TokenRshift)
 			} else {
-				ctx.setToken(tokenGreater)
+				ctx.setToken(lexer.TokenGreater)
 			}
 
 		case '~':
 			c, sz = ctx.Peek()
 			if c == '>' {
 				ctx.Advance(sz)
-				ctx.setToken(tokenInEdgeSub)
+				ctx.setToken(lexer.TokenInEdgeSub)
 			} else {
 				// Standalone tilde is not an operator in Puppet
 				ctx.SetPos(start)
@@ -558,12 +339,12 @@ func (ctx *context) nextToken() {
 			c, sz = ctx.Peek()
 			if c == '@' {
 				ctx.Advance(sz)
-				ctx.setToken(tokenAtat)
+				ctx.setToken(lexer.TokenAtat)
 			} else if c == '(' {
 				ctx.Advance(sz)
 				ctx.consumeHeredocString()
 			} else {
-				ctx.setToken(tokenAt)
+				ctx.setToken(lexer.TokenAt)
 			}
 
 		case '<':
@@ -571,25 +352,25 @@ func (ctx *context) nextToken() {
 			switch c {
 			case '=':
 				ctx.Advance(sz)
-				ctx.setToken(tokenLessEqual)
+				ctx.setToken(lexer.TokenLessEqual)
 			case '<':
 				ctx.Advance(sz)
 				c, sz = ctx.Peek()
 				if c == '|' {
 					ctx.Advance(sz)
-					ctx.setToken(tokenLlcollect)
+					ctx.setToken(lexer.TokenLlcollect)
 				} else {
-					ctx.setToken(tokenLshift)
+					ctx.setToken(lexer.TokenLshift)
 				}
 			case '|':
 				ctx.Advance(sz)
-				ctx.setToken(tokenLcollect)
+				ctx.setToken(lexer.TokenLcollect)
 			case '-':
 				ctx.Advance(sz)
-				ctx.setToken(tokenOutEdge)
+				ctx.setToken(lexer.TokenOutEdge)
 			case '~':
 				ctx.Advance(sz)
-				ctx.setToken(tokenOutEdgeSub)
+				ctx.setToken(lexer.TokenOutEdgeSub)
 			case '%':
 				if ctx.eppMode {
 					ctx.Advance(sz)
@@ -599,7 +380,7 @@ func (ctx *context) nextToken() {
 					switch c {
 					case '=':
 						ctx.Advance(sz)
-						ctx.setToken(tokenRenderExpr)
+						ctx.setToken(lexer.TokenRenderExpr)
 					case '-':
 						ctx.Advance(sz)
 						ctx.nextToken()
@@ -610,7 +391,7 @@ func (ctx *context) nextToken() {
 				}
 				fallthrough
 			default:
-				ctx.setToken(tokenLess)
+				ctx.setToken(lexer.TokenLess)
 			}
 
 		case '|':
@@ -621,14 +402,14 @@ func (ctx *context) nextToken() {
 				c, sz = ctx.Peek()
 				if c == '>' {
 					ctx.Advance(sz)
-					ctx.setToken(tokenRrcollect)
+					ctx.setToken(lexer.TokenRrcollect)
 				} else {
-					ctx.setToken(tokenRcollect)
+					ctx.setToken(lexer.TokenRcollect)
 				}
 			default:
-				if ctx.currentToken == tokenPipe {
+				if ctx.currentToken == lexer.TokenPipe {
 					// Empty parameter list
-					ctx.setToken(tokenPipeEnd)
+					ctx.setToken(lexer.TokenPipeEnd)
 				} else {
 					pos := ctx.Pos()
 					n, _ := ctx.skipWhite(false)
@@ -636,9 +417,9 @@ func (ctx *context) nextToken() {
 					if n == '{' || n == '>' || ctx.eppMode && (n == '%' || n == '-') {
 						// A lambda parameter list cannot start with either of these tokens so
 						// this must be the end (next is either block body or block return type declaration)
-						ctx.setToken(tokenPipeEnd)
+						ctx.setToken(lexer.TokenPipeEnd)
 					} else {
-						ctx.setToken(tokenPipe)
+						ctx.setToken(lexer.TokenPipe)
 					}
 				}
 			}
@@ -653,7 +434,7 @@ func (ctx *context) nextToken() {
 			if ctx.isRegexpAcceptable() && ctx.consumeRegexp() {
 				return
 			}
-			ctx.setToken(tokenDivide)
+			ctx.setToken(lexer.TokenDivide)
 
 		case '$':
 			c, sz = ctx.Peek()
@@ -669,7 +450,7 @@ func (ctx *context) nextToken() {
 			}
 			if isLowercaseLetter(c) {
 				ctx.Advance(sz)
-				ctx.consumeQualifiedName(start, tokenVariable)
+				ctx.consumeQualifiedName(start, lexer.TokenVariable)
 			} else if isDecimalDigit(c) {
 				ctx.Advance(sz)
 				ctx.skipDecimalDigits()
@@ -679,7 +460,7 @@ func (ctx *context) nextToken() {
 			} else {
 				ctx.tokenValue = ``
 			}
-			ctx.settokenValue(tokenVariable, ctx.tokenValue)
+			ctx.settokenValue(lexer.TokenVariable, ctx.tokenValue)
 
 		case '0':
 			ctx.radix = 10
@@ -687,7 +468,7 @@ func (ctx *context) nextToken() {
 
 			switch c {
 			case 0:
-				ctx.settokenValue(tokenInteger, int64(0))
+				ctx.settokenValue(lexer.TokenInteger, int64(0))
 				return
 
 			case 'x', 'X':
@@ -703,7 +484,7 @@ func (ctx *context) nextToken() {
 				}
 				v, _ := strconv.ParseInt(ctx.From(hexStart), 16, 64)
 				ctx.radix = 16
-				ctx.settokenValue(tokenInteger, v)
+				ctx.settokenValue(lexer.TokenInteger, v)
 
 			case '.', 'e', 'E':
 				// 0[.eE]<something>
@@ -722,9 +503,9 @@ func (ctx *context) nextToken() {
 				if ctx.Pos() > octalStart {
 					v, _ := strconv.ParseInt(ctx.From(octalStart), 8, 64)
 					ctx.radix = 8
-					ctx.settokenValue(tokenInteger, v)
+					ctx.settokenValue(lexer.TokenInteger, v)
 				} else {
-					ctx.settokenValue(tokenInteger, int64(0))
+					ctx.settokenValue(lexer.TokenInteger, int64(0))
 				}
 			}
 
@@ -871,7 +652,7 @@ outer:
 			c, n = ctx.Peek()
 		}
 
-		if c == '-' && token == tokenIdentifier {
+		if c == '-' && token == lexer.TokenIdentifier {
 			// Valid only if a letter or digit is present before end of name
 			i := ctx.Pos() + n
 			for {
@@ -904,9 +685,9 @@ outer:
 
 		ctx.Advance(n)
 		c, n = ctx.Peek()
-		if token == tokenTypeName && isUppercaseLetter(c) ||
-			token != tokenTypeName && (isLowercaseLetter(c) ||
-				token == tokenVariable && c == '_') {
+		if token == lexer.TokenTypeName && isUppercaseLetter(c) ||
+			token != lexer.TokenTypeName && (isLowercaseLetter(c) ||
+				token == lexer.TokenVariable && c == '_') {
 			// Next segment starts here and only last segment is allowed to
 			// start with underscore
 			if !lastStartsWithUnderscore {
@@ -918,32 +699,32 @@ outer:
 
 		ctx.SetPos(start)
 		issueCode := issue.Code(lexInvalidName)
-		if token == tokenTypeName {
+		if token == lexer.TokenTypeName {
 			issueCode = lexInvalidTypeName
-		} else if token == tokenVariable {
+		} else if token == lexer.TokenVariable {
 			issueCode = lexInvalidVariableName
 		}
 		panic(ctx.parseIssue(issueCode))
 	}
 
-	if token == tokenVariable {
+	if token == lexer.TokenVariable {
 		start++ // skip leading '$´
 	}
 
 	word := ctx.From(start)
 
-	if token == tokenIdentifier {
+	if token == lexer.TokenIdentifier {
 		if hasDash {
-			token = tokenString
-		} else if kwToken, ok := keywords[word]; ok {
+			token = lexer.TokenString
+		} else if kwToken, ok := lexer.Keywords[word]; ok {
 			switch kwToken {
-			case tokenBoolean:
+			case lexer.TokenBoolean:
 				ctx.settokenValue(kwToken, word == `true`)
 				return
-			case tokenDefault:
+			case lexer.TokenDefault:
 				ctx.settokenValue(kwToken, DefaultInstance)
 				return
-			case tokenPlan:
+			case lexer.TokenPlan:
 				if ctx.tasks {
 					token = kwToken
 				}
@@ -975,7 +756,7 @@ func (ctx *context) consumeFloat(start int, d rune) {
 		panic(ctx.parseIssue(lexDigitExpected))
 	}
 	v, _ := strconv.ParseFloat(ctx.From(start), 64)
-	ctx.settokenValue(tokenFloat, v)
+	ctx.settokenValue(lexer.TokenFloat, v)
 }
 
 func (ctx *context) skipDecimalDigits() (digitCount int) {
@@ -1005,11 +786,11 @@ func (ctx *context) consumeDelimitedString(delimiter rune, delimiterStart int, i
 			if delimiter != '/' {
 				panic(ctx.unterminatedQuote(delimiterStart, delimiter))
 			}
-			ctx.setToken(tokenDivide)
+			ctx.setToken(lexer.TokenDivide)
 			return
 
 		case delimiter:
-			ctx.settokenValue(tokenString, buf.String())
+			ctx.settokenValue(lexer.TokenString, buf.String())
 			return
 
 		case '\\':
@@ -1099,7 +880,7 @@ func (ctx *context) consumeEPP() {
 				ctx.Advance(sz)
 			}
 			ctx.SetPos(start) // Next token will be TOKEN_RENDER_EXPR
-			ctx.settokenValue(tokenRenderString, buf.String())
+			ctx.settokenValue(lexer.TokenRenderString, buf.String())
 			if buf.Len() == 0 {
 				ctx.nextToken()
 			}
@@ -1130,9 +911,9 @@ func (ctx *context) consumeEPP() {
 		}
 	}
 	if buf.Len() == 0 {
-		ctx.setToken(tokenEnd)
+		ctx.setToken(lexer.TokenEnd)
 	} else {
-		ctx.settokenValue(tokenRenderString, buf.String())
+		ctx.settokenValue(lexer.TokenRenderString, buf.String())
 	}
 }
 
@@ -1163,7 +944,7 @@ func (ctx *context) interpolate(start int) Expression {
 
 		// Call context recursively and expect the ending token to be the ending curly brace
 		ctx.nextToken()
-		expr := ctx.parse(tokenRc, true)
+		expr := ctx.parse(lexer.TokenRc, true)
 
 		// If the result is a single QualifiedName or an AccessExpression or CallMemberExpression with a QualifiedName
 		// as the LHS, then it's actually a variable since the `${var}` is the same as `$var`
@@ -1190,11 +971,11 @@ func (ctx *context) interpolate(start int) Expression {
 	}
 
 	// Not delimited by curly braces. Must be a single identifier then
-	ctx.setToken(tokenVariable)
+	ctx.setToken(lexer.TokenVariable)
 	if c == ':' || isLowercaseLetter(c) || isDecimalDigit(c) {
 		ctx.nextToken()
 	}
-	if ctx.currentToken != tokenIdentifier {
+	if ctx.currentToken != lexer.TokenIdentifier {
 		ctx.SetPos(start)
 		panic(ctx.parseIssue(lexMalformedInterpolation))
 	}
@@ -1239,7 +1020,7 @@ func (ctx *context) consumeBacktickedString() {
 	if c == 0 {
 		panic(ctx.unterminatedQuote(start-1, '`'))
 	}
-	ctx.settokenValue(tokenString, ctx.From(start))
+	ctx.settokenValue(lexer.TokenString, ctx.From(start))
 	ctx.Advance(sz)
 }
 
@@ -1301,7 +1082,7 @@ func (ctx *context) consumeDoubleQuotedString() {
 			return
 		}
 	}
-	ctx.settokenValue(tokenConcatenatedString, ctx.factory.ConcatenatedString(segments, ctx.locator, firstPos, ctx.Pos()-firstPos))
+	ctx.settokenValue(lexer.TokenConcatenatedString, ctx.factory.ConcatenatedString(segments, ctx.locator, firstPos, ctx.Pos()-firstPos))
 }
 
 func (ctx *context) consumeSingleQuotedString() {
@@ -1323,8 +1104,8 @@ func (ctx *context) consumeRegexp() bool {
 		buf.WriteRune('\\')
 		buf.WriteRune(ec)
 	})
-	if ctx.currentToken == tokenString {
-		ctx.currentToken = tokenRegexp
+	if ctx.currentToken == lexer.TokenString {
+		ctx.currentToken = lexer.TokenRegexp
 		return true
 	}
 	ctx.SetPos(start)
@@ -1542,7 +1323,7 @@ findEndOfText:
 			ctx.SetPos(heredocTagEnd)          // Normal parsing continues here
 			ctx.nextLineStart = heredocEnd + 1 // and next newline will jump to here
 			textExpr := ctx.factory.ConcatenatedString(segments, ctx.locator, heredocContentStart, heredocContentEnd-heredocContentStart)
-			ctx.settokenValue(tokenHeredoc, ctx.factory.Heredoc(textExpr, syntax, ctx.locator, heredocStart, heredocContentEnd-heredocStart))
+			ctx.settokenValue(lexer.TokenHeredoc, ctx.factory.Heredoc(textExpr, syntax, ctx.locator, heredocStart, heredocContentEnd-heredocStart))
 			return
 		}
 	} else {
@@ -1554,9 +1335,9 @@ findEndOfText:
 	ctx.nextLineStart = heredocEnd + 1 // and next newline will jump to here
 	if ctx.factory != nil {
 		textExpr := ctx.factory.String(heredoc, ctx.locator, heredocContentStart, heredocContentEnd-heredocContentStart)
-		ctx.settokenValue(tokenHeredoc, ctx.factory.Heredoc(textExpr, syntax, ctx.locator, heredocStart, heredocContentEnd-heredocStart))
+		ctx.settokenValue(lexer.TokenHeredoc, ctx.factory.Heredoc(textExpr, syntax, ctx.locator, heredocStart, heredocContentEnd-heredocStart))
 	} else {
-		ctx.settokenValue(tokenString, heredoc)
+		ctx.settokenValue(lexer.TokenString, heredoc)
 	}
 }
 
@@ -1719,8 +1500,8 @@ func (ctx *context) appendUnicode(buf *bytes.Buffer) {
 func (ctx *context) isRegexpAcceptable() bool {
 	switch ctx.currentToken {
 	// Operands that can be followed by TOKEN_DIVIDE
-	case tokenRp, tokenRb, tokenTypeName, tokenIdentifier, tokenBoolean, tokenInteger, tokenFloat, tokenString,
-		tokenHeredoc, tokenConcatenatedString, tokenRegexp, tokenVariable:
+	case lexer.TokenRp, lexer.TokenRb, lexer.TokenTypeName, lexer.TokenIdentifier, lexer.TokenBoolean, lexer.TokenInteger, lexer.TokenFloat, lexer.TokenString,
+		lexer.TokenHeredoc, lexer.TokenConcatenatedString, lexer.TokenRegexp, lexer.TokenVariable:
 		return false
 	default:
 		return true

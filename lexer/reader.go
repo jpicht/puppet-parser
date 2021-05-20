@@ -1,4 +1,4 @@
-package parser
+package lexer
 
 import (
 	"fmt"
@@ -13,6 +13,8 @@ type StringReader interface {
 	// Returns the the current rune and its size in the parsed string. The position does not change
 	Peek() (c rune, size int)
 
+	PeekAt(pos int) (c rune, size int)
+
 	Advance(size int)
 
 	Pos() int
@@ -26,7 +28,7 @@ type StringReader interface {
 	From(start int) string
 }
 
-type parseError struct {
+type ReaderError struct {
 	message string
 	offset  int
 }
@@ -36,7 +38,7 @@ type stringReader struct {
 	text string
 }
 
-func (e *parseError) Error() string {
+func (e *ReaderError) Error() string {
 	return fmt.Sprintf(`%s at offset %d`, e.message, e.offset)
 }
 
@@ -44,11 +46,11 @@ func NewStringReader(s string) StringReader {
 	return &stringReader{i: 0, text: s}
 }
 
-func (r *stringReader) parseError(message string) *parseError {
-	return &parseError{message: message, offset: r.i}
+func (r *stringReader) parseError(message string) *ReaderError {
+	return &ReaderError{message: message, offset: r.i}
 }
 
-func (r *stringReader) invalidUnicode() *parseError {
+func (r *stringReader) invalidUnicode() *ReaderError {
 	return r.parseError("invalid unicode character")
 }
 
