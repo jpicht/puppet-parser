@@ -59,20 +59,20 @@ type (
 		value PN
 	}
 
-	listPN struct {
+	ListPN struct {
 		elements []PN
 	}
 
-	mapPN struct {
+	MapPN struct {
 		entries []Entry
 	}
 
-	literalPN struct {
+	LiteralPN struct {
 		val interface{}
 	}
 
-	callPN struct {
-		listPN
+	CallPN struct {
+		ListPN
 		name string
 	}
 )
@@ -92,7 +92,7 @@ func (e *pnError) Error() string {
 }
 
 func List(elements []PN) PN {
-	return &listPN{elements}
+	return &ListPN{elements}
 }
 
 func Map(entries []Entry) PN {
@@ -102,15 +102,15 @@ func Map(entries []Entry) PN {
 				e.Key(), keyPattern.String())})
 		}
 	}
-	return &mapPN{entries}
+	return &MapPN{entries}
 }
 
 func Literal(val interface{}) PN {
-	return &literalPN{val}
+	return &LiteralPN{val}
 }
 
 func Call(name string, elements ...PN) PN {
-	return &callPN{listPN{elements}, name}
+	return &CallPN{ListPN{elements}, name}
 }
 
 func ToString(pn PN) string {
@@ -119,21 +119,21 @@ func ToString(pn PN) string {
 	return b.String()
 }
 
-func (pn *listPN) AsCall(name string) PN {
+func (pn *ListPN) AsCall(name string) PN {
 	return Call(name, pn.elements...)
 }
 
-func (pn *listPN) AsParameters() []PN {
+func (pn *ListPN) AsParameters() []PN {
 	return pn.elements
 }
 
-func (pn *listPN) Format(b *bytes.Buffer) {
+func (pn *ListPN) Format(b *bytes.Buffer) {
 	b.WriteByte('[')
 	formatElements(pn.elements, b)
 	b.WriteByte(']')
 }
 
-func (pn *listPN) ToData() interface{} {
+func (pn *ListPN) ToData() interface{} {
 	me := make([]interface{}, len(pn.elements))
 	for idx, op := range pn.elements {
 		me[idx] = op.ToData()
@@ -141,23 +141,23 @@ func (pn *listPN) ToData() interface{} {
 	return me
 }
 
-func (pn *listPN) String() string {
+func (pn *ListPN) String() string {
 	return ToString(pn)
 }
 
-func (pn *listPN) WithName(name string) Entry {
+func (pn *ListPN) WithName(name string) Entry {
 	return &mapEntry{name, pn}
 }
 
-func (pn *callPN) AsCall(name string) PN {
-	return &callPN{listPN{pn.elements}, name}
+func (pn *CallPN) AsCall(name string) PN {
+	return &CallPN{ListPN{pn.elements}, name}
 }
 
-func (pn *callPN) AsParameters() []PN {
+func (pn *CallPN) AsParameters() []PN {
 	return pn.elements
 }
 
-func (pn *callPN) Format(b *bytes.Buffer) {
+func (pn *CallPN) Format(b *bytes.Buffer) {
 	b.WriteByte('(')
 	b.WriteString(pn.name)
 	if len(pn.elements) > 0 {
@@ -167,22 +167,22 @@ func (pn *callPN) Format(b *bytes.Buffer) {
 	b.WriteByte(')')
 }
 
-func (pn *callPN) ToData() interface{} {
+func (pn *CallPN) ToData() interface{} {
 	top := len(pn.elements)
 	args := make([]interface{}, 0, top+1)
 	args = append(args, pn.name)
 	if top > 0 {
-		params := pn.listPN.ToData()
+		params := pn.ListPN.ToData()
 		args = append(args, params.([]interface{})...)
 	}
 	return map[string]interface{}{`^`: args}
 }
 
-func (pn *callPN) String() string {
+func (pn *CallPN) String() string {
 	return ToString(pn)
 }
 
-func (pn *callPN) WithName(name string) Entry {
+func (pn *CallPN) WithName(name string) Entry {
 	return &mapEntry{name, pn}
 }
 
@@ -194,15 +194,15 @@ func (e *mapEntry) Value() PN {
 	return e.value
 }
 
-func (pn *mapPN) AsCall(name string) PN {
+func (pn *MapPN) AsCall(name string) PN {
 	return Call(name, pn)
 }
 
-func (pn *mapPN) AsParameters() []PN {
+func (pn *MapPN) AsParameters() []PN {
 	return []PN{pn}
 }
 
-func (pn *mapPN) Format(b *bytes.Buffer) {
+func (pn *MapPN) Format(b *bytes.Buffer) {
 	b.WriteByte('{')
 	if top := len(pn.entries); top > 0 {
 		formatEntry(pn.entries[0], b)
@@ -221,7 +221,7 @@ func formatEntry(entry Entry, b *bytes.Buffer) {
 	entry.Value().Format(b)
 }
 
-func (pn *mapPN) ToData() interface{} {
+func (pn *MapPN) ToData() interface{} {
 	top := len(pn.entries) * 2
 	args := make([]interface{}, 0, top)
 	for _, entry := range pn.entries {
@@ -230,19 +230,19 @@ func (pn *mapPN) ToData() interface{} {
 	return map[string]interface{}{`#`: args}
 }
 
-func (pn *mapPN) String() string {
+func (pn *MapPN) String() string {
 	return ToString(pn)
 }
 
-func (pn *mapPN) WithName(name string) Entry {
+func (pn *MapPN) WithName(name string) Entry {
 	return &mapEntry{name, pn}
 }
 
-func (pn *literalPN) AsCall(name string) PN {
+func (pn *LiteralPN) AsCall(name string) PN {
 	return Call(name, pn)
 }
 
-func (pn *literalPN) AsParameters() []PN {
+func (pn *LiteralPN) AsParameters() []PN {
 	return []PN{pn}
 }
 
@@ -250,7 +250,7 @@ func (pn *literalPN) AsParameters() []PN {
 // zero following the decimal point is considered significant.
 var StripTrailingZeroes = regexp.MustCompile(`\A(.*(?:\.0|[1-9]))0+(e[+-]?\d+)?\z`)
 
-func (pn *literalPN) Format(b *bytes.Buffer) {
+func (pn *LiteralPN) Format(b *bytes.Buffer) {
 	switch pn.val.(type) {
 	case nil:
 		b.WriteString(`nil`)
@@ -280,15 +280,15 @@ func (pn *literalPN) Format(b *bytes.Buffer) {
 	}
 }
 
-func (pn *literalPN) ToData() interface{} {
+func (pn *LiteralPN) ToData() interface{} {
 	return pn.val
 }
 
-func (pn *literalPN) String() string {
+func (pn *LiteralPN) String() string {
 	return ToString(pn)
 }
 
-func (pn *literalPN) WithName(name string) Entry {
+func (pn *LiteralPN) WithName(name string) Entry {
 	return &mapEntry{name, pn}
 }
 
