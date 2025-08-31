@@ -2,7 +2,7 @@ package validator
 
 import (
 	"github.com/lyraproj/issue/issue"
-	"github.com/lyraproj/puppet-parser/parser"
+	"github.com/jpicht/puppet-parser/parser"
 )
 
 type tasksChecker struct {

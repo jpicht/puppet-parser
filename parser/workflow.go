@@ -1,6 +1,6 @@
 package parser
 
-import "github.com/lyraproj/puppet-parser/pn"
+import "github.com/jpicht/puppet-parser/pn"
 
 type StepStyle string
 

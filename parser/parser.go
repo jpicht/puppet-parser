@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/lyraproj/issue/issue"
-	"github.com/lyraproj/puppet-parser/lexer"
+	"github.com/jpicht/puppet-parser/lexer"
 )
 
 // Recursive descent context for the Puppet language.

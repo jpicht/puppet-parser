@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/lyraproj/issue/issue"
-	"github.com/lyraproj/puppet-parser/parser"
+	"github.com/jpicht/puppet-parser/parser"
 )
 
 var PuppetTasks = false

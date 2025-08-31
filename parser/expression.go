@@ -6,8 +6,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/lyraproj/issue/issue"
-	"github.com/lyraproj/puppet-parser/lexer"
-	"github.com/lyraproj/puppet-parser/pn"
+	"github.com/jpicht/puppet-parser/lexer"
+	"github.com/jpicht/puppet-parser/pn"
 )
 
 // The AST Model. Designed to match the AST model used by the Puppet

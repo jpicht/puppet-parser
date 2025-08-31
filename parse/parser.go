@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"github.com/lyraproj/issue/issue"
-	"github.com/lyraproj/puppet-parser/json"
-	"github.com/lyraproj/puppet-parser/parser"
-	"github.com/lyraproj/puppet-parser/pn"
-	"github.com/lyraproj/puppet-parser/validator"
+	"github.com/jpicht/puppet-parser/json"
+	"github.com/jpicht/puppet-parser/parser"
+	"github.com/jpicht/puppet-parser/pn"
+	"github.com/jpicht/puppet-parser/validator"
 )
 
 // Program to parse and validate a .pp or .epp file

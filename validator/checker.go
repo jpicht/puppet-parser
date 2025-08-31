@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/lyraproj/issue/issue"
-	"github.com/lyraproj/puppet-parser/literal"
-	"github.com/lyraproj/puppet-parser/parser"
+	"github.com/jpicht/puppet-parser/literal"
+	"github.com/jpicht/puppet-parser/parser"
 )
 
 var DoubleColonExpr = regexp.MustCompile(`::`)
